@@ -1,0 +1,398 @@
+---
+title: "ExprimentalAnalysis"
+author: "IM"
+date: "2024-03-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#load libraries
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(gprofiler2)
+library(ComplexHeatmap)
+library(ggpubr)
+library(RColorBrewer)
+library(rlang)
+library(circlize)
+library(gprofiler2)
+library(ComplexHeatmap)
+library(DescTools)
+
+```
+
+```{r Functions, echo=FALSE}
+#define functions for analysing QPCR, Motility, RPPA, and ELISA data
+#data is available at https://doi.org/10.1101/2025.04.03.647095 and  10.5281/zenodo.14261795
+
+#Function to prep QPCR data for plotting and statistical analysis, input is the directory containing raw CV QPCR data
+analyse_QPCR_Replicate<-function(cv_values_dir){
+  delta_cv_values<-data.frame()
+  for(replicate in 1:length(list.files(cv_values_dir))){
+    
+    #read in Cv values
+    dat <- read_csv(list.files(cv_values_dir)[replicate])
+    
+    #format data
+    run_cq_format<-dat %>%
+      select(Sample, `Biological Set Name`, Cq) %>%
+      filter(Sample  != 'NTC' & !is.na(Sample) & Sample != 'PBS_SCR' & Sample !='PBS_CREB1' & `Biological Set Name` != 'UBC' & `Biological Set Name` != 'B2M')
+    
+    #normalize to GAPDH
+    gapdh_cq_avg<-run_cq_format %>%
+      filter(`Biological Set Name` == 'GAPDH') %>%
+      group_by(Sample) %>%
+      summarise(GAPDH_Cq = median(Cq)) %>%
+      select(Sample, GAPDH_Cq)
+    
+    ct_normed<-run_cq_format %>%
+      left_join(gapdh_cq_avg) %>%
+      mutate(Delta_CT_GAPDH = Cq - GAPDH_Cq)
+    
+    #assign replicate
+    ct_normed$Replicate = paste0('Rep',replicate)
+    
+    delta_ct_values<-rbind(delta_ct_values, ct_normed)
+    
+  }
+      return(delta_ct_values)
+
+}
+
+#function to prepare motility experiments for statistical analysis, input is directory containing quantified motility data from a single experiment
+analyse_motility<-function(motility_dir){
+  motility_values<-data.frame()
+  for(replicate in 1:length(list.files(motility_dir))){
+    
+    #read in motility files
+    dat <- read_csv(list.files(motility_dir)[replicate])
+    
+    #normalize the diffusion coefficients to vehicle condition
+  vehicle_dc<-dat %>%
+    group_by(Replicate, ligand) %>%
+    filter(Treatment == 'Vehicle') %>%
+    rename('Vehicle_slope' = slope) %>%
+    select(-Treatment)
+  
+  normalized_dc <-dat %>%
+  full_join(vehicle_dc) %>%
+  mutate(normalized_dc = slope / Vehicle_slope) %>%
+  mutate(`Percent Reduction in Motility` = (1 - normalized_dc)*100 )%>%
+  mutate(`Change in Motility` = -`Percent Reduction in Motility`)
+    
+  motility_values<-rbind(motility_values, normalized_dc)
+    
+  }
+  return(motility_values)
+}
+
+```
+
+```{r Data, echo=FALSE}
+#read in QPCR data and convert to dCT compared to GAPDH
+#data is available at https://doi.org/10.1101/2025.04.03.647095 supplemental table 4
+delta_ct_values<-analyse_QPCR_Replicate('QPCR_dat/')
+
+#read in motility data from drug experiments
+#data is available at 10.5281/zenodo.14261795
+cxcr2inh_dat<-analyze_motility('CXCR2inh_motility/')
+
+#read in table of RPPA values
+#data is avilable at https://doi.org/10.1101/2025.04.03.647095 supplemental table 5
+rppa<-read_csv('MDD_RPPA_2_data.csv')
+
+#read in ELISA data
+#data is avilable at https://doi.org/10.1101/2025.04.03.647095 supplemental table 6,7
+elisa_cxcl3<-read_csv('ELISAcxcl3.csv')
+elisa_cxcl5<-read_csv('ELISAcxcl5.csv')
+```
+
+```{r QPCR analysis, echo=FALSE}
+#transform delta CT values and prep data for statistical tests 
+transformed_deltact<-delta_ct_values %>%
+  group_by(Replicate, `Biological Set Name`, Sample) %>%
+  drop_na() %>%
+  filter(Sample == 'EGF_OSM_SCR' | Sample == 'EGF_OSM_CREB1') %>%
+  summarise(Average_dCT = median(Delta_CT_GAPDH)) %>%
+  mutate(Average_dCT_transformed = Average_dCT * (-1) *2) %>%
+  mutate(Relative_Expression = 2^Average_dCT_transformed) %>%
+  group_by(`Biological Set Name`, Sample) %>%
+  summarise(mean_relative_expressiion = mean(Relative_Expression), relative_exp_se = sd(Relative_Expression)/sqrt(5))%>%
+  mutate(upper_ci = mean_relative_expressiion + relative_exp_se , lower_ci= mean_relative_expressiion - relative_exp_se )
+
+#run t tests for EGF-OSM SCR vs CREB1
+transformed_deltact_pvalues<- transformed_deltact %>%
+  filter(Sample == 'EGF_OSM_SCR' | Sample == 'EGF_OSM_CREB1') %>%
+  group_by(`Biological Set Name`) %>%
+  t_test(Average_dCT ~ Sample, paired = T)
+
+#prepare stat results for pletting
+stat.test <- transformed_deltact_pvalues %>% add_xy_position(x = "Sample")
+stat.test_goi<-transformed_deltact  %>%
+  rename(Gene =`Biological Set Name`) %>%
+  filter(Gene != 'CREB1' & Gene != 'GAPDH') %>%
+  filter(Sample == 'EGF_OSM_SCR' | Sample == 'EGF_OSM_CREB1') %>%
+  group_by(Gene) %>%
+  t_test(Average_dCT ~ Sample, paired = T) %>%
+  mutate(.y. = 'Relative Expression (Normalized to GAPDH)') %>%
+  add_significance() %>%
+  add_xy_position(x = "Sample") %>%
+  mutate(xmin =2) %>%
+  mutate(xmax =3)
+
+#calculate LFC values compared to EGF control
+egfscr_deltadelta<-delta_ct_values %>%
+  filter(Sample == 'EGF_SCR') %>%
+  filter(`Biological Set Name` == 'CXCL5' | `Biological Set Name` == 'CXCL3' | `Biological Set Name` == 'PPBP' | `Biological Set Name` == 'CREB1') %>%
+  group_by(Replicate, `Biological Set Name`) %>%
+  summarise(EGF_SCR_avg = median(Delta_CT_GAPDH)) %>%
+  ungroup() %>%
+  select(Replicate,`Biological Set Name`, EGF_SCR_avg)
+
+egfscr_LFC<-left_join(egfscr_deltadelta, delta_ct_values) %>%
+  mutate(DeltaDelta_CT = Delta_CT_GAPDH - EGF_SCR_avg) %>%
+  mutate(FoldChange = 2^-(DeltaDelta_CT)) %>%
+  drop_na() %>%
+  group_by(Replicate, `Biological Set Name`, Sample) %>%
+  summarise(Average_Fold_Change = mean(FoldChange))
+
+#Plot LFC and statistical significance for CXCL ligands
+ggbarplot(egfscr_LFC, x="Sample", y="Relative_Expression", facet.by = "Gene", nrow = 1,merge = TRUE, add = "mean") + xlab('Condition') + ylab('Relative Expression (Fold Change vs EGF)') +
+  stat_pvalue_manual(stat.test_goi, label = "{p.signif}", size = 8) +
+  geom_errorbar(aes(group = Sample, ymax = upper_ci, ymin = lower_ci),
+                position = position_dodge(width = 0.8), width = 0.25) +
+  theme_bw()  + theme(text=element_text(size=20),panel.border = element_blank(), strip.text = element_text(size = 24), 
+                      panel.grid.minor = element_blank(), axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+#Plot LFC and statistical significance for CREB knockdown
+ggbarplot(filter(transformed_deltact, `Biological Set Name`=='CREB1'), x="Sample", y="mean_relative_expression", nrow = 1,merge = TRUE, add = "mean") + xlab('Condition') + ylab('Relative Expression (Fold Change vs EGF)') +
+  stat_pvalue_manual(stat.test_goi, label = "{p.signif}", size = 8) +
+  geom_errorbar(aes(group = Sample, ymax = upper_ci, ymin = lower_ci),
+                position = position_dodge(width = 0.8), width = 0.25) +
+  theme_bw()  + theme(text=element_text(size=20),panel.border = element_blank(), strip.text = element_text(size = 24), 
+                      panel.grid.minor = element_blank(), axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+```{r statistical comparison of motility}
+#run statistical tests to compare quantified motility rates from drug experiments
+normalized_dc<-cxcr2inh_dat
+
+#test statistical significance of change in motility by fitting a linear model to response
+fit_robust <- lm_robust(`Change in Motility` ~ CXCR2inh_dose * ligand, 
+                        se = "stata",
+                        data = normalized_dc )
+
+#extract model and evaluate residuals
+rg = qdrg(object = fit_robust, data = normalized_dc)
+outgroup_means = emmeans(rg, ~ CXCR2inh_dose | ligand)
+
+#perform contrast testing on residuals
+contrast(outgroup_means)
+
+#Plot motility data
+#calculate median change in motility
+coeff_plot<-normalized_dc %>%
+  group_by(ligand) %>%
+  summarise(`Median Change in Motility` = median(`Change in Motility`), `SD Change in Motility` = sd(`Change in Motility`))
+
+#plot median change in motillity
+ggplot((coeff_plot), aes(x=reorder(ligand, `Median Change in Motility`), y = `Median Change in Motility`, fill = ligand)) +
+  geom_bar(stat = 'identity', color = 'black') + theme_bw() + scale_fill_manual(values = combo_cols) + guides(fill = FALSE, color = FALSE) + ylim(limits = c(-40, 10)) + ylab(str_wrap('Percent Change in Motility After CXCR2 Inhibition', width = 30)) +
+  geom_point(data = Coeff_combine_plot, aes(x=ligand, y=`Change in Motility`), size = 3) +
+ geom_errorbar( aes(x=reorder(ligand, `Median Change in Motility`), ymin=`Median Change in Motility`-`SD Change in Motility`, ymax=`Median Change in Motility`+`SD Change in Motility`, color = ligand),  width=0.25, alpha=0.9, size=1, color = 'black') +
+  scale_color_manual(values = combo_cols) + geom_text(aes(label = sig), size= 10, vjust = 5.5) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=rel(2.5)), axis.title.y = element_text(size=rel(2.5)),
+        axis.text.y = element_text(angle = 0, vjust = 0.5, hjust=1, size=rel(2.5)),
+        plot.title = element_text(size = rel(2)),legend.text=element_text(size = rel(1)),
+        legend.title=element_text(size = rel(1)), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.title.x = element_blank())
+
+```
+
+```{r RPPA analysis}
+#format data and select EGF, OSM, EGFOSM, and T0 data
+rppa_form<-rppa %>%
+  select(-Order, -Sample_Source, -Category_1, -Category_2, -Category_3, -`CF1&2_Outliers`, -Sample_Name, -Sample_Type) %>%
+  filter( (Sample_description == '1_1_OSM' | Sample_description == '1_1_EGF' | Sample_description == '1_1_EGFOSM' | 
+           Sample_description == '2_1_OSM' | Sample_description == '2_1_EGF' | Sample_description == '2_1_EGFOSM' | 
+           Sample_description == '3_1_OSM' | Sample_description == '3_1_EGF' | Sample_description == '3_1_EGFOSM' |
+             Sample_description =="A_3_0_Null_2" | Sample_description =="A_3_0_Null_3" |Sample_description =="A_3_0_Null_1")
+           )
+
+#median summarise data
+rppa_form<-rppa_form %>%
+  select(-Sample_description) %>%
+  group_by(Condition) %>%
+  summarize_if(is.numeric, median) %>%
+  column_to_rownames('Condition') %>%
+  t %>%
+  as.data.frame() 
+
+#evaluate variance of signals
+rppa_var$variance<-apply(rppa_form[c(1:3)],1,var) 
+
+#select most variant features
+rppa_arrange<-rppa_var %>%
+  select(-PBS) %>%
+  arrange(desc(variance)) %>%
+  rownames_to_column('antibody') %>%
+  slice_max(order_by = variance, n = 20) %>%
+  as.data.frame() %>%
+  select( -variance)
+
+#format for heatmap
+df_as_matrix <- rppa_arrange %>%
+  column_to_rownames('antibody') %>%
+  t %>%
+  scale() %>%
+  t %>%
+  as.data.frame()%>%
+  drop_na() %>%
+  as.matrix()
+
+#evaluate statistical significance in antibody expression
+rppa_test<-rppa_form %>%
+  select(-PBS) %>%
+  mutate(Condition = substr(Sample_description, 5,10000)) %>%
+  select(-Sample_description) %>%
+  gather(key = 'Antibody', value = "Antibody Intensity", -Condition) %>%
+  filter(Antibody %in% rppa_arrange$antibody)
+
+#run ANOVA for overall significance
+rppa_anova<-aov(`Antibody Intensity` ~ Condition, data = rppa_test)
+summary(rppa_anova)
+
+#run Dunnett's test comparing to the EGFOSM control
+rppa_dunn<- rppa_test %>%
+  group_by(
+    Antibody
+  ) %>%
+  group_modify(
+    # Perform test and extract summary
+    ~ pairw.anova(.x$`Antibody Intensity`, .x$Condition, conf = 0.95, method = 'dunnett', control = 'EGFOSM')$summary
+  )
+
+#Create the heatmap
+hm <- Heatmap(matrix = df_as_matrix,
+              heatmap_legend_param = list(legend_gp = gpar(fontsize = 24)),
+              name = "Z-Score",
+              show_row_names = T,
+              show_column_names = T,
+              cluster_columns = T,
+              cluster_rows = T,
+              na_col = "grey",
+              row_names_gp = gpar(fontsize = 24),
+              column_names_gp = gpar(fontsize = 24),
+              cell_fun = function(j, i, x, y, w, h, fill) {
+                if(rppa_arrange_dun[i, j] < .05) {
+                  gb = textGrob("*")
+                  gb_w = convertWidth(grobWidth(gb), "mm")
+                  gb_h = convertHeight(grobHeight(gb), "mm")
+                  grid.text("*", x, y - gb_h*0.6,gp = gpar(fontsize = 28, fontface = 'bold'), vjust = .5)
+                } else(grid.text('',x,y))})
+
+#filter for RPPA features that are positive for dunnett's test for both vs EGF and OSM
+rppa_significant_egf<-rppa_dunn %>%
+  select(Antibody, Decision, Comparison) %>%
+  spread(key = 'Comparison', value = 'Decision') %>%
+  filter(`vs EGF` == 'Reject H0' )
+#filter for RPPA features that are positive for dunnett's test for both vs EGF and OSM
+rppa_significant_osm<-rppa_dunn %>%
+  select(Antibody, Decision, Comparison) %>%
+  spread(key = 'Comparison', value = 'Decision') %>%
+  filter(`vs OSM` == 'Reject H0' )
+
+#bar graph of CREB phosphorylation
+rppa_creb_bar <-rppa_form %>%
+  select(Condition, Sample_description, `Creb-R-C`, `CREB_pS133-R-C`) %>%
+  mutate(pCREB_ratio = `CREB_pS133-R-C`/ `Creb-R-C`) %>%
+  group_by(Condition) %>%
+  summarise(pCREB_sd = sd(pCREB_ratio),pCREB_ratio = median(pCREB_ratio) )
+
+rppa_creb_bar_dots<-rppa_form %>%
+  select(Condition, Sample_description, `Creb-R-C`, `CREB_pS133-R-C`) %>%
+  mutate(pCREB_ratio = `CREB_pS133-R-C`/ `Creb-R-C`) 
+
+#bar graph with replicates identified
+ggplot(rppa_creb_bar,aes(x=factor(Condition, levels = c( 'OSM', 'EGF', 'EGF+OSM')), y=pCREB_ratio)) + theme_bw() +
+  geom_bar(stat = 'identity', fill = 'white', color = 'black') +
+  geom_point(data=rppa_creb_bar_dots, aes(x=factor(Condition, levels = c( 'OSM', 'EGF', 'EGF+OSM')), y=pCREB_ratio), size = 3) +
+ # scale_fill_manual(values = combo_cols) +
+  guides(fill = FALSE, color = FALSE)  + ylab('pCREB Ratio') +  geom_errorbar( aes(x=Condition, ymin=pCREB_ratio-pCREB_sd, ymax=pCREB_ratio+pCREB_sd),  width=0.3, alpha=0.9, size=1) +
+  stat_pvalue_manual(
+    stat_plot, 
+    y.position = 2.3, step.increase = 0.1,
+    label = "pvalue"
+  ) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=rel(2.5)), axis.title.y = element_text(size=rel(2.5)),
+        axis.text.y = element_text(angle = 0, vjust = 0.5, hjust=1, size=rel(2)),
+        plot.title = element_text(size = rel(2)),legend.text=element_text(size = rel(1)),
+        legend.title=element_text(size = rel(1)), panel.grid.minor = element_blank(), axis.title.x = element_blank())
+```
+
+```{r ELISA Analysis}
+#fit concentration curve
+elisa_cxcl3$Standard_concentration = c(720,480,320,160,80,40,0)
+elisa_cxcl5$Standard_concentration = c(45,30,20,10,	5,2.5,0)
+
+#format standard curve data
+standard_curve<-elisa_cxcl3 %>%
+  select(Standard, Standard_concentration) %>%
+  rename(concentrations = Standard_concentration, measurements = Standard)
+
+standard_curve2<-elisa_cxcl5 %>%
+  select(Standard, Standard_concentration) %>%
+  rename(concentrations = Standard_concentration, measurements = Standard)
+
+#fit non-linear model to standard ciurve
+model1<-drm(measurements~concentrations,
+            fct=LL.4(fixed=c(NA, 0, NA, NA), names=c("Slope", "Lower", "Upper", "ED50")),
+            data=standard_curve)
+plot(model1)
+
+model2<-drm(measurements~concentrations,
+            fct=LL.4(fixed=c(NA, 0, NA, NA), names=c("Slope", "Lower", "Upper", "ED50")),
+            # lowerl = c(-Inf, 0, .005, 0),
+            data=standard_curve2)
+plot(model2)
+
+#estimate concentration of samples
+cxcl3_quant=as.data.frame(ED(model1,elisa_cxcl3$SampleAbs,type="absolute",display=F))
+
+cxcl5_quant=as.data.frame(ED(model2,elisa_cxcl5$SampleAbs,type="absolute",display=F))
+
+#scale by dilution factors
+cxcl3_quant$Estimate=cxcl3_quant$Estimate*5
+
+cxcl5_quant$Estimate-cxcl5_quant$Estimate*2
+
+#format combined data for plotting
+full_quant=rbind(cxcl3_quant, cxcl5_quant) %>%
+  group_by(Condition, protein) %>%
+  mutate(mean_e = mean(Estimate), upper_ci = mean_e + se(Estimate), lower_ci =mean_e - se(Estimate)) %>%
+  ungroup()
+
+#perform statistical tests (t_test) to evaluate changes in protein
+stat.test_goi<-cxcl3_quant  %>%
+  filter(Condition == 'siCREB1 - EGF' | Condition == 'siSCR - EGF' & protein == 'cxcl3') %>%
+  t_test(Estimate ~ Condition, paired = T) %>%
+  mutate(.y. = 'Concentration') %>%
+  add_significance() %>%
+  add_xy_position(x = "Condition") %>%
+  mutate(xmin =1) %>%
+  mutate(xmax =2)
+
+#barplot of results
+ggbarplot(full_quant, x="Condition", y="Estimate", nrow = 1,merge = TRUE, add = "mean") + xlab('Condition') + ylab('Concentration (pg/mL)') +
+  stat_pvalue_manual(stat.test_goi, label = "{p.signif}", size = 8) +
+  geom_errorbar(aes(group = Condition, ymax = upper_ci, ymin = lower_ci),
+                position = position_dodge(width = 0.8), width = 0.25)  + 
+  geom_point(aes(group = Condition)) +
+  theme_bw()  + theme(text=element_text(size=20),panel.border = element_blank(), strip.text = element_text(size = 24), 
+                      panel.grid.minor = element_blank(), axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+```
+
