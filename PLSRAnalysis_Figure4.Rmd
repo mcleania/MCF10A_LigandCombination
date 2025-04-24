@@ -1,0 +1,505 @@
+---
+title: "RNAseqPLSRAnalysis"
+author: "IM"
+date: "2025-03-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#load libraries
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(gprofiler2)
+library(eulerr)
+library(ComplexHeatmap)
+library(ggpubr)
+library(RColorBrewer)
+library(rlang)
+library(circlize)
+library(pls)
+library(Seurat)
+library(gprofiler2)
+library(eulerr)
+library(ComplexHeatmap)
+
+#set ligand graphical parameters
+combo_cols<- c(
+  "EGF+OSM" = "violet",
+  "OSM" = "dodgerblue",
+  "EGF" = "red",
+  "EGF+TGFB" = "orange",
+  "OSM+TGFB" = "green4",
+  "TGFB" = "yellow2",
+  "EGF+OSM+TGFB" = "black",
+  "PBS" = "gray65")
+
+```
+
+```{r Functions, echo=FALSE}
+#define functions for performing PLSR regression on RNAseq and phenotypic data
+#raw and processed RNAseq data are available at the Gene Expression Omnibus: GSE282654
+#raw phenotype data is available at 10.5281/zenodo.14261795
+
+#Function to prep RNAseq counts and phenotypic data for PLSR analysis
+prep_counts<-function(counts=counts_file, tpm=tpm_file ,phenotype=plsr_y_variables){
+  
+  #read counts file into Seurat for VST variable feature selection
+  counts_seurat_mat<-CreateSeuratObject(counts_file[-c(1:3)])
+  counts_seurat_mat<-FindVariableFeatures(counts_seurat_mat, nfeatures = 2000)
+  
+  #select top 2000 variable features
+  variablefeatures2000_lab<-counts_file[counts_seurat_mat@assays$RNA@var.features,]
+  
+  #filter for most variant genes
+  tpm_rep_var<-tpm_file %>%
+    dplyr::select(-gene_biotype) %>%
+    filter(ensembl_gene_id %in% variablefeatures2000_lab$ensembl_gene_id) %>%
+    select(-hgnc_symbol) %>%
+    drop_na() 
+  
+  #format TPM data and add metadata
+  tpm_var<-tpm_rep_var %>%
+    select(-ensembl_gene_id) %>%
+    t %>%
+    as.data.frame() %>%
+    rownames_to_column('Name') 
+
+  colnames(tpm_var)<-c('Name',make.names((tpm_rep_var$ensembl_gene_id), unique = T))
+
+  
+  Condition = rep(c('CTRL', 'EGF_OSM', 'EGF', 'EGF_TGFB', 'OSM', 'EGF_OSM_TGFB', 'OSM_TGFB', 'PBS',
+                  'TGFB'), 3)
+
+  tpm_var$Treatment <-Condition
+
+  Replicate = c(rep(1,9), rep(2,9), rep(3,9))
+
+  tpm_var$Replicate<-Replicate
+  
+  #add identifier to samples
+  tpm_var$SID<-paste0(tpm_var$Treatment, tpm_var$Replicate)
+  plsr_y_variables$SID<-paste0(plsr_y_variables$Treatment, plsr_y_variables$Replicate)
+
+  #Normalize tpm file to T0
+  all_time_normalized<-data.frame()
+  for(replicate in 1:3){
+  tpm_var_ctrl <- tpm_var %>%
+   filter(Treatment == 'CTRL') 
+
+  tpm_time_normalized_1<-tpm_var %>%
+    filter(Replicate == replicate)
+    t1_ctrl_vector<-as.numeric(tpm_var_ctrl[1,c(-1,-2504,-2503, -2502)])
+
+  tpm_time_normalized_1_b = sweep(as.matrix(tpm_time_normalized_1[c(-1,-2504,-2503, -2502)]), 2, as.numeric(tpm_var_ctrl[1,c(-1,-2504,-2503, -2502)]), '-')
+
+  tpm_time_normalized_1_c<-cbind(tpm_time_normalized_1[c(1,2504,2503, 2502)],tpm_time_normalized_1_b)
+  tpm_time_normalized_1_c$Replicate<-replicate
+  
+  all_time_normalized<-rbind(tpm_time_normalized_1_c, all_time_normalized)%>%
+  filter(Treatment != 'CTRL')
+  }
+
+  #combine time normalized TPM file and phenotypic metrics to form matrices for PLSR
+  combo_combined<-full_join(plsr_y_variables, all_time_normalized)
+  combo_X<-as.matrix(combo_combined[-c(1:10)])
+  
+  return(combo_combined, combo_X)
+  
+}
+
+
+#evaluate VIP score in PLSR Models to assess gene importance in the model
+VIP <- function(object) {
+  if (object$method != "oscorespls")
+    stop("Only implemented for orthogonal scores algorithm.  Refit with 'method = \"oscorespls\"'")
+  if (nrow(object$Yloadings) > 1)
+    stop("Only implemented for single-response models")
+  
+  SS <- c(object$Yloadings)^2 * colSums(object$scores^2)
+  Wnorm2 <- colSums(object$loading.weights^2)
+  SSW <- sweep(object$loading.weights^2, 2, SS / Wnorm2, "*")
+  sqrt(nrow(SSW) * apply(SSW, 1, cumsum) / cumsum(SS))
+}
+
+#perform GSEA on top PLSR signatures
+GSEA_list<-function(signature){
+  
+  #select top 100 negatively and positively correlated genes
+  vip_top <-signature %>%
+  filter(`combo_Y_proliferation.1 comps`>0) %>%
+  slice(1:100)
+  
+  vip_neg <-signature %>%
+  filter(`combo_Y_proliferation.1 comps`<0) %>%
+  slice(1:100)
+  
+  #GSEA of positive and negatively correlated genes
+  positive_gsea_results_gp <- gost(query = vip_top$ensembl_gene_id, 
+                                 organism = "hsapiens", ordered_query = TRUE, 
+                                 multi_query = FALSE, significant = TRUE, 
+                                 user_threshold = 0.05, correction_method = "g_SCS", 
+                                 numeric_ns = "", as_short_link = FALSE, highlight = TRUE, sources = 'GO')
+
+  top_pathways<-positive_gsea_results_gp$result %>%
+    arrange(p_value)%>%
+    mutate(logpscore = -log(p_value, base=10))
+  
+  down_gsea_results_gp <- gost(query = vip_neg$ensembl_gene_id, 
+                                    organism = "hsapiens", ordered_query = TRUE, 
+                                    multi_query = FALSE, significant = TRUE, 
+                                    user_threshold = 0.05, correction_method = "g_SCS", 
+                                    numeric_ns = "", as_short_link = FALSE, highlight = TRUE, sources = 'GO')
+
+  top_neg_pathways<-down_gsea_results_gp$result %>%
+    arrange(p_value)%>%
+    mutate(logpscore = -log(p_value, base=10))
+  
+  return(top_pathways, top_neg_pathways)
+}
+
+
+```
+
+```{r Data, echo=FALSE}
+#import phenotypic features from live cell imaging
+#raw data is available at 10.5281/zenodo.14261795
+plsr_y_variables<-read_csv( 'plsr_metrics.csv')
+
+#import replicate raw counts data and tpm file
+#data are available at the Gene Expression Omnibus: GSE282654
+counts_file<-read_csv('MDD_ligandCombination_RNAseq_counts_allGenes.csv')
+tpm_file<-read_csv('MDD_ligandCombination_RNAseq_log2TPM_allGenes.csv')
+
+#format TPM file and create PLSR variable matrices
+combo_combined<-prep_counts(counts = counts_file, tpm = tpm_file, phenotype = plsr_y_variables)[1]
+combo_X<-prep_counts[2]
+
+#read in BCCL RNAseq external dataset https://doi.org/10.1073/pnas.1018854108
+gray_rna<-read_tsv('JWGray_BCCL_rnaseq_matrix_v1-2.txt')
+
+#read in BCCL phenotypic external data https://doi.org/10.1038/s41598-019-47440-w.
+migration_names<-read_csv('Migration_BCCL.csv')
+prolif_names<-read_csv('Proliferation_BCCL.csv')
+
+#DEPMAP gene effect data from breast cancer cell lines
+#https://doi.org/https://doi.org/10.25452/figshare.plus.25880521.v1
+crispr_gene_effect<-read_csv('CRISPRGeneEffect.csv')
+
+```
+
+```{r PLSR}
+#cell count PLSR
+count_plsr<-plsr(combo_Y_proliferation~combo_X, ncomp=2, validation='LOO', method="oscorespls", scale=T)
+
+#select components based on RMSEP of fit
+plot(RMSEP(count_plsr), legendpos = "topright")
+plot(count_plsr, ncomp = 2, asp = 1, line = TRUE)
+
+#extract coefficients from model
+count_coeff<-as.data.frame(count_plsr$coefficients) %>%
+  rownames_to_column('ensembl_gene_id')
+
+#evaluate fit
+cell_count_y_var<-drop(R2(count_plsr, estimate = "train", intercept = FALSE)$val)
+
+#calculate VIP score for whole model weighted by variance explained
+cell_count_vip<-as.data.frame(t(VIP(count_plsr))) %>%
+  mutate(VIP_SCORE = (`Comp 1`*cell_count_y_var[1] + `Comp 2`*(cell_count_y_var[2] - cell_count_y_var[1]))) %>%
+  rownames_to_column('ensembl_gene_id') %>%
+  left_join(count_coeff) %>%
+  arrange((desc(VIP_SCORE)))
+
+#PLSR model for motility
+combo_X<-as.matrix(combo_combined[-c(1:10)])
+combo_Y_slope<-scale(as.matrix(combo_combined[c(6)]))
+
+slope_plsr<-plsr(combo_Y_slope~combo_X, ncomp=3, validation='LOO', method="oscorespls", scale=T)
+
+#select components based on RMSEP of fit
+plot(RMSEP(slope_plsr), legendpos = "topright")
+plot(slope_plsr, ncomp = 3, asp = 1, line = TRUE)
+
+#extract coefficients from model
+slope_vip<-as.data.frame(t(VIP(slope_plsr))) %>%
+  arrange(desc(`Comp 1`)) %>%
+  rownames_to_column('ensembl_gene_id')
+slope_coeff<-as.data.frame(slope_plsr$coefficients) %>%
+  rownames_to_column('ensembl_gene_id')
+
+#evaluate fit
+slope_y_var<-drop(R2(slope_plsr, estimate = "train", intercept = FALSE)$val)
+
+#calculate VIP score for whole model weighted by variance explained
+slope_top<-slope_vip %>%
+  mutate(VIP_SCORE =(`Comp 1`*slope_y_var[1]  + `Comp 2`*(slope_y_var[2]-slope_y_var[1]) + `Comp 3`*(slope_y_var[3] - slope_y_var[2]))) %>%
+  left_join(slope_coeff) %>%
+  arrange(desc(VIP_SCORE))
+
+#PLSR model for Nearest Neighbor
+combo_X<-as.matrix(combo_combined[-c(1:10)])
+combo_Y_neighbor<-scale(as.matrix(combo_combined[c(7)]))
+
+neighbor_plsr<-plsr(combo_Y_neighbor~combo_X, ncomp=2, validation='LOO', method="oscorespls", scale=T)
+
+#select components based on RMSEP
+plot(RMSEP(neighbor_plsr), legendpos = "topright")
+plot(neighbor_plsr, ncomp = 2, asp = 1, line = TRUE)
+
+#extract coefficiennts and VIP
+neighbor_vip<-as.data.frame(t(VIP(neighbor_plsr))) %>%
+  arrange(desc(`Comp 1`)) %>%
+  rownames_to_column('ensembl_gene_id')
+
+neighbor_coeff<-as.data.frame(neighbor_plsr$coefficients) %>%
+  rownames_to_column('ensembl_gene_id')
+
+#evaluate fit
+neighbor_y_var<-drop(R2(neighbor_plsr, estimate = "train", intercept = FALSE)$val)
+
+#calculate weighted VIP scores
+neighbor_top<-neighbor_vip %>%
+  mutate(VIP_SCORE =(`Comp 1`*neighbor_y_var[1]  + `Comp 2`*(neighbor_y_var[2]-neighbor_y_var[1]))) %>%
+  arrange(desc(VIP_SCORE)) %>%
+  left_join(neighbor_coeff) 
+
+#PLSR model for cytoplasmic size
+combo_X<-as.matrix(combo_combined[-c(1:10)])
+combo_Y_cytoplasm<-scale(as.matrix(combo_combined[c(8)]))
+
+cytoplasm_plsr<-plsr(combo_Y_cytoplasm~combo_X, ncomp=5, validation='LOO', method="oscorespls", scale=T)
+
+#select components based on RMSEP
+plot(RMSEP(cytoplasm_plsr), legendpos = "topright")
+plot(cytoplasm_plsr, ncomp = 5, asp = 1, line = TRUE)
+
+#extract VIP and coefficients
+cytoplasm_vip<-as.data.frame(t(VIP(cytoplasm_plsr))) %>%
+  arrange(desc(`Comp 1`)) %>%
+  rownames_to_column('ensembl_gene_id')
+
+cytoplasm_coeff<-as.data.frame(cytoplasm_plsr$coefficients) %>%
+  rownames_to_column('ensembl_gene_id')
+
+#evaluate fit
+cytoplasm_y_var<-drop(R2(cytoplasm_plsr, estimate = "train", intercept = FALSE)$val)
+
+#calculate weighted VIP scores
+cytoplasm_top<-cytoplasm_vip %>%
+  mutate(VIP_SCORE =(`Comp 1`*cytoplasm_y_var[1]  + `Comp 2`*(cytoplasm_y_var[2] - cytoplasm_y_var[1]) +  `Comp 3`*(cytoplasm_y_var[3] - cytoplasm_y_var[2]) +
+                       `Comp 4`*(cytoplasm_y_var[4] - cytoplasm_y_var[3]) + `Comp 5`*(cytoplasm_y_var[5] - cytoplasm_y_var[4]))) %>%
+  left_join(cytoplasm_coeff) %>%
+  arrange(desc(VIP_SCORE))
+```
+
+
+```{r GSEA analysis of phenotypic gene signatures}
+#Perform overrepresentation GSEA on top 100 and bottom 100 genes in PLSR model correlated to phenotype
+count_gsea<-GSEA_list(cell_count_vip_top)
+motility_gsea<-GSEA_list(slope_top)
+nearestneighbor_gsea<-GSEA_list(neighbor_top)
+cytoplasm_gsea<-GSEA_list(cytoplasm_top)
+
+#barplot of top pathways
+ggplot(count_gsea[1][1:10,], aes(x = reorder(term_name, (logpscore)), y = logpscore)) + 
+  geom_bar(stat = 'identity') + coord_flip()  + scale_y_reverse(limits = c(8,0)) + scale_x_discrete(labels=function(x) str_wrap(x, width=25)) +  labs(x = "log10(q-value)") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 0, size=rel(2)),
+        axis.text.y = element_text(angle = 0, vjust = 0.5, hjust=1, size=rel(2)),
+        plot.title = element_text(size = rel(2)),legend.text=element_text(size = rel(1)), axis.title.y = element_blank(),axis.title = element_text(size = rel(2)),
+        legend.title=element_text(size = rel(2)), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  ggplot(count_gsea[2][1:10,], aes(x = reorder(term_name, (logpscore)), y = logpscore)) + 
+  geom_bar(stat = 'identity') + coord_flip()  + scale_x_discrete(labels=function(x) str_wrap(x, width=25), position = 'top') +  labs(x = "log10(q-value)") + scale_y_continuous(limits = c(0,8)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 0, size=rel(2)),
+        axis.text.y = element_text(angle = 0, vjust = 0.5, hjust=1, size=rel(2)),
+        plot.title = element_text(size = rel(2)),legend.text=element_text(size = rel(1)), axis.title.y = element_blank(), axis.title = element_text(size = rel(2)),
+        legend.title=element_text(size = rel(2)), panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+#heatmap of gene signature
+#make heatmaps of top 100 positively and negatively correlated VIPS
+combo_combined_hm<-combo_combined %>%
+  dplyr::select(Treatment, Replicate, average_cytoplasm, cytoplasm_top$ensembl_gene_id) %>%
+  arrange(desc(average_cytoplasm))
+
+vip_hm<-as.matrix(t(combo_combined_hm[-c(1:3)])) %>% t %>%
+  scale() %>%
+  t
+colnames(vip_hm)<-combo_combined_hm$Treatment
+
+colnames(slope_vip_hm)<-gsub('_','+',colnames(slope_vip_hm))
+
+ht<-Heatmap(matrix = vip_hm,
+            name = "Z-Score",
+            column_title = 'Top PLSR Correlates to Cytoplasmic Size',
+            show_row_names = F,
+            show_column_names = T,
+            show_row_dend = F,
+            show_column_dend = F,
+            cluster_columns = F,
+            cluster_rows = F,
+            row_title_gp = gpar(fontsize = 22),
+            top_annotation = ha2,
+            right_annotation = ha,
+            row_split = factor(append(rep(("Positive"), 100), rep('Negative',100)), levels = c('Positive','Negative')),
+            heatmap_legend_param = list(labels_gp = gpar( fontsize = 18), title_gp = gpar( fontsize = 18)),
+            column_title_gp = gpar(fontsize = 23),
+            column_names_gp = gpar(fontsize = 16),
+            row_names_gp = gpar(fontsize = 16))
+```
+
+```{r Overlap in signatures}
+#look at overlap of lists, both positive and negative correlates
+vip_upset<-list(Proliferation=cell_count_vip_neg$ensembl_gene_id, Migration=slope_vip_neg$ensembl_gene_id, `Nearest Neighbor Distance`=neighbor_vip_neg$ensembl_gene_id,
+                `Cytoplasmic Size` = cytoplasm_vip_neg$ensembl_gene_id)
+
+vip_upset_mat<-make_comb_mat(vip_upset)
+UpSet(vip_upset_mat, row_names_gp = grid::gpar(fontsize = 20), comb_order = order((comb_size(vip_upset_mat))))
+
+#Venn overlap of prolif and migration top 100 vips
+p<-plot(positive_euler,  quantities = TRUE,
+        edges = "black",
+        main = list(label = "Positive VIPs",  size = 18),
+        legend = list(side = "right", size = 18))
+
+p<-plot(negative_euler,  quantities = TRUE,
+        edges = "black",
+        main = list(label = "Negative VIPs",  size = 18),
+        legend = list(side = "right", size = 18))
+```
+
+```{r Model external BCCL datasets using PLSR model}
+#predict migration and proliferation with entire PLSR model
+
+#format BCCL data so that genes agree and cell lines are consistent, and scale expression data
+scaled_gray<-gray_rna %>%
+  t %>%
+  as.data.frame() %>%
+  rownames_to_column('Cell_Line') %>%
+  filter(Cell_Line %in% migration_names$Cell_Line) %>%
+  mutate_if(is.numeric,scale) 
+
+scaled_gray_form <-scaled_gray %>%
+  column_to_rownames('Cell_Line') %>%
+  t %>%
+  as.data.frame() %>%
+  rownames_to_column('ensembl_gene_id') %>%
+  filter(ensembl_gene_id %in% colnames(combo_X)) %>%
+  column_to_rownames('ensembl_gene_id') %>%
+  t
+
+#predict motility and cell count
+motility_prediction<-predict(slope_plsr, ncomp = 1, newdata = scaled_gray_form)
+
+#z-score predictions
+motility_prediction_z<-motility_prediction %>%
+  as.data.frame() %>%
+  rownames_to_column('Cell_Line') %>%
+  left_join(migration_names)
+motility_prediction_z$motility_prediction_zscore = scale(motility_prediction_z$`combo_Y_slope.1 comps`) 
+
+#plot
+ggplot(motility_prediction_z, aes(x=`combo_Y_slope.1 comps`, y = Migration))+
+  geom_point() + theme_bw() + coord_flip() +
+  stat_poly_line() +
+  stat_poly_eq()+
+  theme(axis.text.x = element_text(angle = 0, size=rel(2)),
+        axis.text.y = element_text(angle = 0, vjust = 0.5, hjust=1, size=rel(2)),
+        plot.title = element_text(size = rel(2)),legend.text=element_text(size = rel(1)), axis.title = element_text(size = rel(2)),
+        legend.title=element_text(size = rel(2)), panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
+```{r DEPMAP analysis}
+#look at correlation between cell count predictor and DEPMAP essentiallity
+
+#format data from depmap
+crispr_format<-crispr_gene_effect %>%
+  rename(ModelID = ...1) %>%
+  column_to_rownames('ModelID') %>%
+  t %>%
+  as.data.frame() %>%
+  rownames_to_column('hgnc_symbol') %>%
+  mutate(hgnc_symbol = gsub(' .*', '',hgnc_symbol))
+
+#filter for breast cancer cell lines
+breast_models<-models %>%
+  filter(OncotreeLineage == 'Breast')
+
+#look at essentiality of genes in heatmap for proliferation
+hm_genes<-all_gene_vip %>%
+  filter(ensembl_gene_id %in% cell_count_vip_top$ensembl_gene_id | ensembl_gene_id %in% cell_count_vip_neg$ensembl_gene_id)
+
+#order the genes to be consistent with gene heatmap
+order_genes_top<-rbind(cell_count_vip_top,cell_count_vip_neg) %>%
+  rownames_to_column('Order') %>%
+  left_join(all_gene_vip) %>%
+  filter(`combo_Y_proliferation.1 comps`>0)
+order_genes_top$Order<-as.numeric(order_genes_top$Order)
+order_genes_bottom<-rbind(cell_count_vip_top,cell_count_vip_neg) %>%
+  rownames_to_column('Order') %>%
+  left_join(all_gene_vip) %>%
+  filter(`combo_Y_proliferation.1 comps`<0)
+order_genes_bottom$Order<-as.numeric(order_genes_bottom$Order)
+
+#plot depmap score
+top<-ggplot(order_genes_top, aes(x=GeneEffect, y = rev(Order))) +
+  geom_point() + xlab('Gene Effect') + ylab('VIP Score') + theme_bw() + geom_vline(xintercept = -1, linetype = 'dashed', color = 'red') +
+  theme(axis.text.x = element_text(angle = 0, size=rel(2)),
+        plot.margin = margin(10, 11, 10, 10),
+        axis.text.y = element_blank(), axis.title.y = element_blank(), axis.ticks.y = element_blank(),
+        plot.title = element_text(size = rel(2)),legend.text=element_text(size = rel(1)), axis.title = element_text(size = rel(2)),
+        legend.title=element_text(size = rel(2)), panel.grid.major = element_blank(),  panel.grid.minor = element_blank())
+bottom<-ggplot(order_genes_bottom, aes(x=GeneEffect, y = rev(Order))) +
+  geom_point() + xlab('Gene Effect') + ylab('VIP Score') + theme_bw() + geom_vline(xintercept = -1, linetype = 'dashed', color = 'red') +
+  theme(axis.text.x = element_text(angle = 0, size=rel(2)),
+        plot.margin = margin(10, 11, 10, 10),
+        axis.text.y = element_blank(), axis.title.y = element_blank(), axis.ticks.y = element_blank(),
+        plot.title = element_text(size = rel(2)),legend.text=element_text(size = rel(1)), axis.title = element_text(size = rel(2)),
+        legend.title=element_text(size = rel(2)), panel.grid.major = element_blank(),  panel.grid.minor = element_blank())
+
+top+bottom
+
+#run chi squared on Geneeffect <= -1 and VIP score >=1
+all_gene_vip_hi_lo<-all_gene_vip %>%
+  mutate(gene_effect_direction = ifelse(GeneEffect <= -.5, 'Essential_Gene',
+         'NonEssential_Gene')) %>%
+  mutate(VIP_direction = ifelse(VIP_SCORE >= 1, 'High_VIP',
+                                        'Low_VIP'))
+
+chisq.test(all_gene_vip_hi_lo$gene_effect_direction, all_gene_vip_hi_lo$VIP_direction, correct=FALSE)
+
+#look at all genes
+all_gene_vip_median<-all_gene_vip_hi_lo %>%
+  group_by(ensembl_gene_id, VIP_SCORE) %>%
+  summarise(GeneEffect = mean(GeneEffect)) %>%
+  drop_na()
+
+#color genes by essentiality
+all_gene_vip_median$`Mean Value`[all_gene_vip_median$GeneEffect<(-.5)] = '< -0.5'
+all_gene_vip_median$`Mean Value`[all_gene_vip_median$GeneEffect>(-.5)] = '> -0.5'
+
+#join genes to cell count signature
+all_gene_vip_combined<-all_gene_vip_hi_lo %>%
+  select(VIP_SCORE, GeneEffect, ensembl_gene_id) %>%
+  mutate(`Mean Value` = '') %>%
+  full_join(all_gene_vip_median) %>%
+  arrange(desc(VIP_SCORE))
+
+#plot essentiality and VIP Score
+ggplot(all_gene_vip_combined, aes(x=GeneEffect, y = VIP_SCORE, color = `Mean Value`, size = `Mean Value`, alpha = `Mean Value`)) +
+  geom_point() + xlab('Gene Effect') + ylab('VIP Score') + theme_bw() + geom_vline(xintercept = -.5, linetype = 'dashed', color = 'red')+ scale_alpha_manual(values = c("> -0.5" = 1, "< -0.5"=1, .3)) +
+  scale_x_reverse(lim =c(0,-5)) + scale_color_manual(values = c("> -0.5" = 'gray39', "< -0.5"="red4", 'gray'), breaks = c("< -0.5", "> -0.5")) +
+  scale_size_manual(values = c("< -0.5" = 3, "> -0.5"=3, 1.5)) + guides(color=guide_legend(title="Mean Gene Effect"), size = 'none', alpha = 'none') +
+  theme(axis.text.x = element_text(angle = 0, size=rel(2)),strip.text.y = element_blank(),strip.text = element_blank(),
+        strip.background = element_blank(),
+        plot.margin = margin(10, 11, 10, 10),
+        axis.text.y = element_text(size=rel(2)), 
+        plot.title = element_text(size = rel(2)),legend.text=element_text(size = rel(1.5)), axis.title = element_text(size = rel(2)),
+        legend.title=element_text(size = rel(2)), panel.grid.minor = element_blank())
+
+```
+
