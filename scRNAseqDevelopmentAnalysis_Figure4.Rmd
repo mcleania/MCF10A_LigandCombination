@@ -1,0 +1,143 @@
+---
+title: "Figure6_ExprimentalAnalysis"
+author: "IM"
+date: "2025-03-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#load libraries
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(gprofiler2)
+library(ComplexHeatmap)
+library(ggpubr)
+library(RColorBrewer)
+library(rlang)
+library(circlize)
+library(gprofiler2)
+library(ComplexHeatmap)
+```
+
+```{r Functions, echo=FALSE}
+#define functions for exploring PLSR model in murine mammary development scRNAseq data
+#data is from https://doi.org/10.1038/ncomms9487.
+
+#Function to prep scRNAseq data for PLSR signature analysis
+prep_GSE<-function(directory=dir, dev_stage=stage){
+  dat <- Read10X(data.dir = "dir")
+  dat_s <- CreateSeuratObject(counts = dat, project = "Visvader_Dev", min.cells = 3, min.features = 200)
+  dat_s[["Developmental_Stage"]] <- stage
+}
+
+```
+
+```{r Data, echo=FALSE}
+#read in 10x data from developmental stages, integrate and normalize
+dat_1<-prep_GSE('Adult_BL6/', 'Adult_BL6')
+dat_2<-prep_GSE('Embryonic_E18_ME/', 'Embryonic ME')
+dat_3<-prep_GSE('Puberty_Ducts/','Puberty Ducts')
+dat_4<-prep_GSE('Puberty_TerminalEndBuds/', 'Puberty_TerminalEndBuds')
+
+#normalize all data
+dat_list<-c(dat_1, dat_2, dat_3, dat_4)
+dat_list <- lapply(X = dat_list, FUN = function(x) {
+  x <- NormalizeData(x)
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+})
+
+#find integratin features and run pca using those features
+features <- SelectIntegrationFeatures(object.list = dat_list)
+
+dat_list <- lapply(X = dat_list, FUN = function(x) {
+  x <- ScaleData(x, features = features, verbose = FALSE)
+  x <- RunPCA(x, features = features, verbose = FALSE)
+})
+
+dat_anchors <- FindIntegrationAnchors(object.list = dat_list, anchor.features = features, reduction = "rpca")
+
+#integrate data
+dat_combined <- IntegrateData(anchorset = dat_anchors)
+
+DefaultAssay(dat_combined) <- "integrated"
+
+#run standard seurat normalization
+dat_combined<-FindVariableFeatures(dat_combined)
+all.genes<-rownames(dat_combined)
+dat_combined <- ScaleData(dat_combined, verbose = FALSE, features = all.genes)
+dat_combined <- RunPCA(dat_combined, npcs = 30, verbose = FALSE)
+dat_combined <- RunUMAP(dat_combined, reduction = "pca", dims = 1:30)
+dat_combined <- FindNeighbors(dat_combined, reduction = "pca", dims = 1:30)
+dat_combined <- FindClusters(dat_combined, resolution = 0.5)
+
+#UMAP by developmental stage
+p1 <- DimPlot(dat_combined, reduction = "umap", group.by = "Developmental_Stage", raster = FALSE)
+p2 <- DimPlot(dat_combined, reduction = "umap", label = TRUE, repel = TRUE, raster = FALSE)
+p1 + p2
+```
+
+```{r expression of PLSR signatures}
+#read in VIP signatures for migration and cell count PLSR
+#data is available at https://doi.org/10.1101/2025.04.03.647095 Supplemental Table 2,3
+proliferation_geneset<-read_csv('count_vips_500.csv')
+migration_geneset<-read_csv('slope_vips.csv')
+
+#convert genes in plsr models to mouse orthologs 
+human = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+mgi2ensembl<-getBM(attributes = c('hgnc_symbol', 'ensembl_gene_id'), mart = human, value = proliferation_geneset$hgnc_symbol)
+ensembl2hgnc <- getBM(attributes = c("mmusculus_homolog_associated_gene_name", "ensembl_gene_id"), 
+                        filters = "ensembl_gene_id", 
+                        mart = human, 
+                        value = mgi2ensembl$ensembl_gene_id)
+merge_dat<-merge(mgi2ensembl, ensembl2hgnc)
+
+#trim PLSR signature genes to genes with a mouse ortholog
+proliferation_module<-proliferation_geneset %>%
+  select('hgnc_symbol') %>%
+  left_join(merge_dat) %>%
+  filter(mmusculus_homolog_associated_gene_name !='') 
+
+migration_module<-migration_geneset%>%
+  select('hgnc_symbol') %>%
+  left_join(merge_dat) %>%
+  filter(mmusculus_homolog_associated_gene_name !='') %>%
+  filter(mmusculus_homolog_associated_gene_name %notin% t)
+
+#Add module scores
+dat_combined <- AddModuleScore(
+  object = dat_combined,
+  features = proliferation_module$mmusculus_homolog_associated_gene_name,
+  ctrl = 5,
+  name = 'Proliferation_module'
+)
+
+dat_combined <- AddModuleScore(
+  object = dat_combined,
+  features = migration_module$mmusculus_homolog_associated_gene_name,
+  ctrl = 5,
+  name = 'Migration_module'
+)
+
+#Violin and feature plot of module scores by developmental stage
+VlnPlot(dat_combined, features = c('Proliferation_module1'), group.by = 'Developmental_Stage', raster = FALSE, pt.size = 0)
+
+FeaturePlot(dat_combined, features = c('Proliferation_module_top1'), raster = F, split.by = 'Developmental_Stage')
+
+#find basal markers
+basal_markers<-FindMarkers(dat_combined, ident.1 = 'Basal', only.pos = T)
+
+#overlap of markers in cell count signature
+overlap_prolif_basal<-proliferation_module_full %>%
+  filter(mmusculus_homolog_associated_gene_name %in% rownames(basal_markers[1:1600,]))
+
+#heatmap of shared markers
+DoHeatmap(dat_combined, features = overlap_prolif_basal$mmusculus_homolog_associated_gene_name[1:20]) +
+  theme(plot.margin = margin(0,2,0,1.5, "cm"))
+
+```
+
