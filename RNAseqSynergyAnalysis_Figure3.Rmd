@@ -1,0 +1,205 @@
+---
+title: "RNAseqSynergyAnalysis"
+author: "IM"
+date: "2024-06-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#load libraries
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(gprofiler2)
+library(eulerr)
+library(ComplexHeatmap)
+library(ggpubr)
+library(RColorBrewer)
+library(rlang)
+library(circlize)
+
+#set ligand graphical parameters
+combo_cols<- c(
+  "EGF+OSM" = "violet",
+  "OSM" = "dodgerblue",
+  "EGF" = "red",
+  "EGF+TGFB" = "orange",
+  "OSM+TGFB" = "green4",
+  "TGFB" = "yellow2",
+  "EGF+OSM+TGFB" = "black",
+  "PBS" = "gray65")
+
+cols <- c(
+          "Positively Synergistic" = "green",
+          "Negatively Synergistic" = "orange",
+          'n'='gray'
+)
+```
+
+```{r Functions, echo=FALSE}
+#define functions for defining synergy in RNAseq ligand combination data
+#raw and processed data are available at the Gene Expression Omnibus: GSE282654
+
+#Function to identify synergy from combination vs. two single ligand differential expression analysis
+#input is a dataframe of Differential expression p-values and LFC values from DESEQ2
+identify_synergy<-function(Combo_DE_File1, Combo_DE_File2, condition1 = 'EGF', condition2 = 'OSM',combocondition = 'EGF_OSM'){
+  
+  #format DE analysis from DESEQ2, combination ligands vs both single ligands
+  comparison1 = paste0('Combo_vs_',condition1)
+  comparison1_pval = paste0('Combo_vs_',condition1,'_pval')
+  
+  file1_dge<-Combo_DE_File1 %>%
+  rename(!!comparison1:=hgnc_symbol, log2FoldChange, !!comparison1_pval:=padj) %>%
+  dplyr::select(ensembl_gene_id,hgnc_symbol,!!comparison1,!!comparison1_pval)
+  
+  comparison2 = paste0('Combo_vs_',condition2)
+  comparison2_pval = paste0('Combo_vs_',condition2,'_pval')
+  
+  file2_dge<-Combo_DE_File2 %>%
+  rename(!!comparison2:=hgnc_symbol, log2FoldChange, !!comparison2_pval:=padj) %>%
+  dplyr::select(ensembl_gene_id,hgnc_symbol,!!comparison2,!!comparison2_pval)
+  
+  #combine data
+  combo_dge<-full_join(file1_dge, file2_dge) %>%
+  drop_na() 
+  
+  #identify upregulated and downregulated gene sets @ LFC 1.5 & pval <.05 for both comparisons
+  combo_dge_15lfc<-combo_dge
+
+  combo_1_dge_15_up<- combo_dge_15lfc %>%
+    filter(!!comparison1 > 1.5 & !!comparison1_pval < .05) 
+
+  combo_1_dge_15_down<-combo_dge_15lfc %>%
+    filter(!!comparison1 < (-1.5) & !!comparison1_pval < .05) 
+
+  combo_2_dge_15_up<-combo_dge_15lfc %>%
+    filter(!!comparison2 > 1.5 & !!comparison2_pval < .05) 
+
+  combo_2_dge_15_down<-combo_dge_15lfc %>%
+    filter(!!comparison2 < (-1.5) & !!comparison2_pval < .05) 
+
+  #label synergistic genes
+  combo_label<-combo_dge %>%
+    mutate(label = ifelse(ensembl_gene_id %in% combo_1_dge_15_up$ensembl_gene_id & ensembl_gene_id %in% test = combo_2_dge_15_up$ensembl_gene_id, 'Positively Synergistic',ifelse(ensembl_gene_id %in% combo_1_dge_1_down$ensembl_gene_id & ensembl_gene_id %in% combo_2_dge_1_down$ensembl_gene_id, 'Negatively Synergistic', 'n')))
+  
+  return(combo_label)
+}
+```
+
+```{r Data, echo=FALSE}
+#read in differential expression data generated from DESEQ2, all combination conditions vs respective single ligands
+egf_egfosm_dge<-read_csv('MDD_ligandCombination_RNAseq_DETable_allGenes_EGF_OSM_vs_EGF.csv')
+osm_egfosm_dge<-read_csv('MDD_ligandCombination_RNAseq_DETable_allGenes_EGF_OSM_vs_OSM.csv')
+tgfb_egftgfb_dge<-read_csv('MDD_ligandCombination_RNAseq_DETable_allGenes_EGF_TGFB_vs_EGF.csv')
+egf_egftgfb_dge<-read_csv('MDD_ligandCombination_RNAseq_DETable_allGenes_EGF_TGFB_vs_TGFB.csv')
+tgfb_osmtgfb_dge<-read_csv('MDD_ligandCombination_RNAseq_DETable_allGenes_OSM_TGFB_vs_OSM.csv')
+osm_osmtgfb_dge<-read_csv('MDD_ligandCombination_RNAseq_DETable_allGenes_OSM_TGFB_vs_OSM.csv')
+```
+
+```{r Plot Synergyistic Genes}
+EGF_OSM_synergy<-identify_synergy(Combo_DE_File1 = egf_egfosm_dge, Combo_DE_File2 = osm_egfosm_dge, condition1 = 'EGF', condition2 = 'OSM',combocondition = 'EGF_OSM')
+
+ggplot(combo_label_eo, aes(x=Combo_vs_EGF_LFC, y =Combo_vs_OSM_LFC, color = label)) +
+  geom_point(size=2, alpha=.6) + xlab('EGF+OSM vs EGF LFC') + ylab('EGF+OSM vs OSM LFC') + scale_color_manual(values = cols, breaks = c('Positively Synergistic - 17 Genes','Negatively Synergistic - 148 Genes')) + ylim(-11, 11) + xlim(-11,11) + theme_bw() + geom_vline(xintercept =0, linetype = 2 ) + geom_hline(yintercept = 0, linetype = 2) + theme(text = element_text(size=21),legend.text = element_text(size=14), legend.position = c(.75, .95),legend.title=element_blank(), panel.grid.major = element_blank(), legend.key = element_rect(fill = "transparent", colour = "transparent"),legend.background = element_rect(fill = NA),panel.grid.minor = element_blank()) + 
+  ggtitle('EGF + OSM') + theme(plot.title = element_text(hjust = 0.5)) + coord_fixed()
+
+
+#make Venn of overlaps between synergistic and repressed gene sets
+
+#filter synergistic genes for each condition
+egf_osm_synergy<-EGF_OSM_synergy %>%
+  filter(label == 'Positively Synergistic')
+egf_tgfb_synergy<-EGF_TGFB_synergy %>%
+  filter(label == 'Positively Synergistic')
+osm_tgfb_synergy<-OSM_TGFB_synergy %>%
+  filter(label == 'Positively Synergistic')
+
+#identify shared genes
+shared_by_all_three<-egf_osm_synergy %>%
+  filter(hgnc_symbol %in% egf_tgfb_synergy$hgnc_symbol & hgnc_symbol %in% osm_tgfb_synergy$hgnc_symbol)
+
+#plot euler
+synergistic_fit1 <- euler(c("EGF + OSM" = 13, "EGF + TGFB" = 75, "OSM + TGFB" = 33,
+                "EGF + OSM&EGF + TGFB" = 3, "OSM + TGFB&EGF + TGFB" = 31, 
+                "EGF + OSM&EGF + TGFB&OSM + TGFB" = 1))
+
+#repeat for negative synergy
+egf_osm_negsynergy<-EGF_OSM_synergy %>%
+  filter(label == 'Negatively Synergistic')
+egf_tgfb_negsynergy<-EGF_TGFB_synergy %>%
+  filter(label == 'Negatively Synergistic')
+osm_tgfb_negsynergy<-OSM_TGFB_synergy %>%
+  filter(label == 'Negatively Synergistic')
+
+shared_by_all_three<-egf_osm_repressed %>%
+  filter(hgnc_symbol %in% egf_tgfb_repressed$hgnc_symbol & hgnc_symbol %in% osm_tgfb_repressed$hgnc_symbol)
+
+repressed_fit1 <- euler(c("EGF + OSM" = 111 , "EGF + TGFB" = 71, "OSM + TGFB" = 16,
+                          "EGF + OSM&EGF + TGFB" = 30, "OSM + TGFB&EGF + TGFB" = 4, "EGF + OSM&OSM + TGFB" = 2, "EGF + OSM&EGF + TGFB&OSM + TGFB" = 5))
+
+col <- c("violet", "orange", "green4")
+
+plot(synergistic_fit1,
+     quantities = TRUE,
+     fills = list(fill = col, alpha = 0.8),
+     edges = "black",
+     main = list(label = "Positively Synergistic Genes",  size = 14),
+     legend = list(side = "bottom", size = 14))
+```
+
+```{r GSEA of synergistic gene sets, echo=FALSE}
+#Perform GSEA on positive and negative gene sets
+
+#combine and name genesets
+list_of_all_synergy<-list(osmegf_synergy, osmtgfb_synergy, tgfbegf_synergy, osmegf_repression, osmtgfb_repression, tgfbegf_repression)
+
+names(list_of_all_synergy)<-c('osmegf_synergy', 'osmtgfb_synergy', 'tgfbegf_synergy', 'osmegf_repression', 'osmtgfb_repression', 'tgfbegf_repression')
+
+#perform GSEA using gene ontology and default parameters
+list_of_gsea_dfs<-list()
+for(cluster in 1:length(unique(list_of_all_synergy))){
+  cluster<-names(list_of_all_synergy)[cluster]
+  genes<-list_of_all_synergy[[cluster]]
+  gene_vector<-genes$ensembl_gene_id
+  gsea <- gsea <- gost(query = gene_vector, 
+                       organism = "hsapiens", ordered_query = FALSE, 
+                       multi_query = FALSE, significant = TRUE, 
+                       user_threshold = 0.5, correction_method = "g_SCS", 
+                       numeric_ns = "", sources = "GO", as_short_link = FALSE, highlight = TRUE)
+  gsea_df<-gsea[["result"]]
+  list_of_gsea_dfs[[cluster]]<-gsea_df
+}
+
+#combine and reduce
+combined_gsea<- unlist(list_of_gsea_dfs) %>% purrr::reduce(full_join, by = c("term_name", "cluster", "p_value", "recall")) 
+
+#select the top 4 enriched gene sets with a p-value <.01
+top5<-combined_gsea %>%
+  group_by(cluster) %>%
+  arrange(p_value) %>%
+  filter(p_value<.01) %>%
+  top_n(wt = p_value, n=-4) %>%
+  top_n(wt = recall, n=4)
+
+#filter for selected gene sets
+gsea_cutoff<-combined_gsea %>%
+  filter(term_name %in% 
+           categories_top5_and_q$term_name) %>%
+  mutate(log_p_value = -log(p_value))
+
+a<-c("green","green", "green", 'orange', 'orange', 'orange')
+
+#plot GSEA enrichment
+ggplot(gsea_cutoff, aes(x=(name), y= term_name_order, size=100*recall,  color = p_value)) +
+  geom_point() + scale_color_continuous(trans='reverse', limits = c(0.01,0)) +scale_size_continuous(range = c(1, 15)) +
+  guides(color = guide_colorbar(reverse = FALSE)) +
+  scale_y_discrete(labels = label_wrap(22), limits = rev) +
+  expand_limits(x=0) + theme_bw()  + 
+  labs(x="Gene Cass", y="GO term Biological Process",  size="Gene Ratio", color = 'Adj p-value') +
+  theme(text=element_text(size=30),plot.title =element_text(size=40), axis.title.x = element_blank(), axis.text.x = element_text(size = 30, angle = 45, hjust = 1, vjust=.95), axis.text.y = element_text(size = 35, hjust = .5)) +
+  ggtitle('Gene Set Enrichment of Synergistic Gene Sets') + theme(plot.title = element_text(hjust = 0.5))
+```
+
