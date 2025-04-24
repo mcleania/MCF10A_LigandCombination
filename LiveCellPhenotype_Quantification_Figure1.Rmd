@@ -1,0 +1,376 @@
+---
+title: "LiveCellPhenotype_Quantification"
+author: "IM"
+date: "2025-03-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#load libraries
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(ggpmisc)
+library(lsmeans)
+
+#set ligand graphical parameters
+combo_cols<- c(
+  "EGF+OSM" = "violet",
+  "OSM" = "dodgerblue",
+  "EGF" = "red",
+  "EGF+TGFB" = "orange",
+  "OSM+TGFB" = "green4",
+  "TGFB" = "yellow2",
+  "EGF+OSM+TGFB" = "black",
+  "PBS" = "gray65")
+
+combo_alpha<- c(
+  "EGF+OSM" = .4,
+  "OSM" = 1,
+  "EGF" = 1,
+  "EGF+TGFB" = .4,
+  "OSM+TGFB" = .4,
+  "TGFB" = 1,
+  "EGF+OSM+TGFB" = .4,
+  "PBS" = .4)
+
+combo_linetype<- c(
+  "EGF+OSM" = 'dashed',
+  "OSM" = 'solid',
+  "EGF" = 'solid',
+  "EGF+TGFB" = 'dashed',
+  "OSM+TGFB" = 'dashed',
+  "TGFB" = 'solid',
+  "EGF+OSM+TGFB" = 'dashed',
+  "PBS" = 'dashed')
+```
+
+
+```{r functions, echo=FALSE}
+#functions for calculating phenotypic metrics for live cell imaging segmentations
+#raw data is available at 10.5281/zenodo.14261795
+
+#Calculate mean squared displacement over timmecourse imaging
+computeMSD <- function(sx,sy,until=8)
+{
+  msd.t <- rep(0,until)
+  for (dt in 1:until)
+  {
+    displacement.x <- as.vector(na.omit(sx[(1+dt):length(sx)]) - sx[1:(length(sx)-dt)])
+    displacement.y <- as.vector(na.omit(sy[(1+dt):length(sy)]) - sy[1:(length(sy)-dt)])
+    sqrdispl <- (displacement.x^2 + displacement.y^2)
+    msd.t[dt] <- mean(sqrdispl)
+  }
+  return(msd.t)
+}
+
+#loop through full experiment to calculate MSD for each cell
+msd_all_images<-function(dataframe,until=8){
+  full_list<-unique(dataframe[, c('ObjectNumber', 'Metadata_Field', 'Metadata_Plate', 'treatment')])
+  full_msd<-data.frame()
+  for (object in 1:nrow(full_list)){
+    tryCatch({object_data<-subset(dataframe, ObjectNumber == toString(full_list[object,1]) & Metadata_Field == toString(full_list[object,2]) & Metadata_Plate == toString(full_list[object,3]) & treatment == toString(full_list[object,4]))
+    time_dat<-data.frame(time_segment = numeric())
+    for(time in 1:until){
+      time_seg = time*30
+      time_dat[time,1]<-as.numeric(time_seg)
+    }
+    print(object)
+    object_msd<-round(computeMSD(object_data$AreaShape_Center_X, object_data$AreaShape_Center_Y, until=until), digits=2)
+    object_msd_meta<-data.frame(ObjectNumber = rep(toString(full_list[object,1]), until), Metadata_Field=rep(toString(full_list[object,2]), until), Metadata_Plate=rep(toString(full_list[object,3]), until),treatment = rep(toString(as.character(full_list[object,4])), until), time_interval = (time_dat$time_seg), MSD = (object_msd)) 
+    full_msd<-rbind(full_msd, object_msd_meta)}, error = function(e){})
+  }
+  
+  return(full_msd)
+}
+
+#Calculate the Nearest Neighbor Distance for each cell
+nearest_neighbor_dist<-function(nuc_data){
+  coord_data<-nuc_data[c(5:6)]
+  ln<-nrow(coord_data)
+  top_distances<-data.frame(firstneighbor=numeric(),secondneighbor=numeric(),thirdneighbor=numeric(),fourthneighbor=numeric())
+  
+  #search for nearest neighbor within 400 pixel square
+  for(i in 1:nrow(coord_data)){
+    point<-coord_data[i,]
+    high_bounds_x<-as.numeric(point[1] + 200)
+    low_bounds_x<-as.numeric(point[1] - 200)
+    high_bounds_y<-as.numeric(point[2] + 200)
+    low_bounds_y<-as.numeric(point[2] - 200)
+    
+    search_data<-subset(coord_data, (AreaShape_Center_X > low_bounds_x) & AreaShape_Center_X < high_bounds_x & 
+                          (AreaShape_Center_Y > low_bounds_y & AreaShape_Center_Y < high_bounds_y))
+    
+    #if four neighbors not found, expand square
+    if(nrow(search_data)<4){
+      high_bounds_x<-as.numeric(point[1] + 400)
+      low_bounds_x<-as.numeric(point[1] - 400)
+      high_bounds_y<-as.numeric(point[2] + 400)
+      low_bounds_y<-as.numeric(point[2] - 400)
+      
+      search_data<-subset(coord_data, (AreaShape_Center_X > low_bounds_x) & AreaShape_Center_X < high_bounds_x & (AreaShape_Center_Y > low_bounds_y & AreaShape_Center_Y < high_bounds_y))
+      
+      if(nrow(search_data)<4){
+        high_bounds_x<-as.numeric(point[1] + 600)
+        low_bounds_x<-as.numeric(point[1] - 600)
+        high_bounds_y<-as.numeric(point[2] + 600)
+        low_bounds_y<-as.numeric(point[2] - 600)
+        
+        search_data<-subset(coord_data, (AreaShape_Center_X > low_bounds_x) & AreaShape_Center_X < high_bounds_x & (AreaShape_Center_Y > low_bounds_y & AreaShape_Center_Y < high_bounds_y))
+        if(nrow(search_data)<4){
+          
+          search_data<-coord_data
+          
+        }}}
+    
+    #find distance to nearest neighbors
+    d<-Euclidean(search_data,point1=point)
+    sorted_d<-sort(d)
+    
+      top<-sorted_d[1:4]
+      
+      #if no neighbor found, set to maximum distance
+      top[is.na(top)]<-1344
+      top_distances[i,1:4]<-top[1:4]
+    }
+  
+  
+  return(top_distances)
+}
+
+```
+
+
+```{r live cell imaging analysis, echo=FALSE}
+#read in live cell tracking data
+full_meta<-read_csv('LigandCombination_LCimagingTracks.csv')
+
+#QC to filter out small tracks < 10 time intervals (<2.5 Hrs)  
+track_lengths<-full_meta %>%
+  group_by(ObjectNumber, Metadata_Field, Metadata_Plate) %>%
+  summarise(track_length=n())
+
+#Eliminate tracks less then 10 images, these are likely tracking images or cells entering/leaving the field
+full_tracks<-track_lengths %>%
+  filter(track_length > 10)%>%
+  mutate(object_id = paste0(Metadata_Field,'_', Metadata_Plate,'_',ObjectNumber))
+
+full_meta_long<-full_meta %>%
+  mutate(object_id = paste0(Metadata_Field,'_', Metadata_Plate,'_',ObjectNumber)) %>%
+  filter(object_id %in% full_tracks$object_id)
+```
+
+```{r Caculate CellCount, echo=F}
+#reformat data
+cell_numbers<-full_meta %>%
+  mutate(time = (ImageNumber-1)*30) %>%
+  mutate(Well = gsub('_.*','',Metadata_Field)) %>%
+  group_by(time,Well,treatment, Metadata_Field, Metadata_Plate) %>%
+  summarise(cell_counts = n()) %>%
+  mutate(hours = time/60)
+
+#normalize to time zero
+cell_numbers_t0<-cell_numbers %>%
+  filter(hours==0) %>%
+  group_by(time,Well,treatment, Metadata_Field, Metadata_Plate) %>%
+  summarise(t0_well_cell_count = mean(cell_counts)) %>%
+  ungroup() %>%
+  select(Well,treatment, Metadata_Plate,Metadata_Field,t0_well_cell_count)
+
+cell_numbers_normed<-left_join(cell_numbers, cell_numbers_t0) %>%
+  mutate(Relative_Cell_Count = cell_counts / t0_well_cell_count)
+
+#normalized cell numbers by replicate at 24 hours for PLSR analysis
+cell_numbers_replicate<-cell_numbers_normed %>%
+  group_by(treatment, Metadata_Plate, hours) %>%
+  summarize(T0_Normed_CellCount = mean(Relative_Cell_Count), Well_CellCount = sum(cell_counts)) %>%
+  filter(hours == 24) %>%
+  rename('Treatment' = treatment, Plate = 'Metadata_Plate') %>%
+  mutate(Replicate= case_when(
+    grepl("54", Plate)~ 1,
+    grepl("55", Plate) ~ 2,
+    grepl("56", Plate) ~ 3))
+
+#treatment summarized cell number by treatment
+cell_numbers_trt<-cell_numbers_normed %>%
+  group_by(treatment, hours) %>%
+  summarize(Average_Relative_Cell_Count = mean(Relative_Cell_Count), cell_count_sd = sd(Relative_Cell_Count))   %>%
+  mutate(trt_cell_count_ci = 1.96*cell_count_sd) %>%
+  mutate(label = if_else(hours == 24, as.character(treatment), NA_character_)) %>%
+  mutate(label_x = if_else(hours == 24, 28, NA)) %>%
+  mutate(label_y = if_else(hours == 24, 28, NA)) 
+
+#Plot treatment summarised cell counts
+ggplot((cell_numbers_trt), aes(x=hours, y = Average_Relative_Cell_Count, group = treatment, color = treatment, linetype = treatment)) + scale_color_manual(values = combo_cols) +
+  geom_line(linewidth = 2) + ylab('Cell Count') + xlab('Time (hrs)') + scale_x_continuous(breaks=c(6,12,18,24)) + scale_linetype_manual(values = combo_linetype) + expand_limits(x = 31) +
+  labs(color = 'Treatment') + theme_bw() + geom_ribbon(aes(ymin = Average_Relative_Cell_Count - cell_count_sd, ymax = Average_Relative_Cell_Count + cell_count_sd), linetype=3, alpha=0.1) +
+  theme(axis.text.x = element_text(angle = 0, size=rel(2)),
+        axis.text.y = element_text(angle = 0, vjust = 0.5, hjust=1, size=rel(2)),
+        plot.title = element_text(size = rel(2)),legend.text=element_text(size = rel(1)), axis.title = element_text(size = rel(2)),
+        legend.title=element_text(size = rel(2)), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  geom_label(aes(label = label,x=label_x, y =label_y),alpha = 1,
+                   na.rm = TRUE)
+
+```
+
+```{r Quantify Motility, echo=FALSE}
+#calculate distance and displacement travelled for each cell
+ 
+#QC filter cells that travel unreasonable distances (>400um / hr)
+all_cells_qc_filtered<-full_meta_long %>%
+  group_by(ObjectNumber, Metadata_Field, Metadata_Plate, treatment) %>%
+  mutate(max_dist = max(distance_diff)) %>%
+  filter(max_dist < 200)
+
+#calculate mean squared displacement on QC filtered Cells
+msd<-msd_all_images(all_cells_qc_filtered, until = 12) 
+
+#calculate median MSD by replicate
+msd_avg<-msd %>%
+  group_by( time_interval, treatment) %>%
+  mutate(msd_cell_sd = sd(MSD)) %>%
+  summarize(median_replicate_msd = mean(MSD), well_msd_sd = mean(msd_cell_sd))  %>%
+  mutate(field_msd_ci = 1.96*well_msd_sd) %>%
+  mutate(time_interval_hours = time_interval / 60)
+
+#compute slope of MSD for PLSR model
+m.interaction <- msd_avg %>% group_by(Metadata_Plate, treatment) %>% 
+  summarise( mod = list(lm(median_replicate_msd ~ time_interval))) 
+
+coeff<-data.frame(Plate = character(), Treatment = character(), slope = numeric())
+for(item in 1:nrow(m.interaction)){
+  slope<-m.interaction$mod[[item]]["coefficients"][[1]][2]
+  plate<-m.interaction$Metadata_Plate[[item]]
+  trt<-m.interaction$treatment[[item]]
+ object<-data.frame(Plate = plate, Treatment = trt, slope = slope)
+  
+  coeff<-rbind(coeff, object)
+}
+
+#obtain slopes using linear model
+m.lst <- lstrends(m.interaction, "treatment", var="time_interval")
+
+slopes<-as.data.frame(m.lst)
+
+#plot treatment summarised MSD
+msd_trt<-msd %>%
+  group_by(time_interval, treatment) %>%
+  summarize(trt_average_msd = mean(MSD), trt_msd_sd = se(MSD)) %>%
+  mutate(trt_msd_ci = 1.96*trt_msd_sd) %>%
+  mutate(time_interval_hours = time_interval / 60) %>%
+  mutate(label = if_else(time_interval_hours == 6, as.character(treatment), NA_character_))%>%
+  mutate(label_x = if_else(time_interval_hours == 6, 7, NA)) %>%
+  mutate(label_y = if_else(time_interval_hours == 6, 7, NA)) 
+
+#plot MSD
+ggplot((msd_trt), aes(x=(time_interval_hours), y = (trt_average_msd), group = treatment, color = treatment, linetype = treatment)) + scale_color_manual(values = combo_cols) +
+  geom_line(linewidth = 2) + ylab('MSD (Mean Squared Displacement)') + xlab('Time Interval (hrs)') + scale_x_continuous(breaks=c(0,1,2,3,4,5,6)) + scale_linetype_manual(values = combo_linetype) +
+  labs(color = 'Treatment') + theme_bw() +geom_ribbon(aes(ymin = (trt_average_msd) - (trt_msd_ci), ymax = (trt_average_msd) + (trt_msd_ci)), linetype=3, alpha=0.1) + expand_limits(x=7.9) +
+  theme(axis.text.x = element_text(angle = 0, size=rel(2)),
+        axis.text.y = element_text(angle = 0, vjust = 0.5, hjust=1, size=rel(2)),
+        plot.title = element_text(size = rel(2)),legend.text=element_text(size = rel(1)), axis.title = element_text(size = rel(2)),
+        legend.title=element_text(size = rel(2)), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  geom_label(aes(label = label, x=label_x, y = label_y),alpha = 1,
+                   na.rm = TRUE)
+
+#Plot single cell distributions of motility
+msd$treatment<-factor(msd$treatment, levels = c('EGF', 'OSM', 'TGFB', 'EGF_OSM', 'EGF_TGFB', 'OSM_TGFB', 'EGF_OSM_TGFB', 'PBS'), labels = c('EGF', 'OSM', 'TGFB', 'EGF+OSM', 'EGF+TGFB', 'OSM+TGFB', 'EGF+OSM+TGFB', 'PBS'))
+
+msd_plot_sc<-msd %>%
+  mutate(time_interval_hours = time_interval / 60) %>%
+  mutate(hours_label = paste0(time_interval_hours, ' Hrs'))
+
+ggplot((filter(msd_plot_sc, time_interval == 360)), aes(x=MSD, y = treatment, fill = treatment)) + 
+  geom_density_ridges(rel_min_height=0.02) + xlab('MSD (Mean Squared Displacement)') +   scale_fill_manual(values = combo_cols) +
+  labs(color = 'Treatment') + theme_bw()   + xlim(c(0,15000)) + scale_y_discrete(limits = rev) + guides(fill="none") +
+  theme(axis.text.x = element_text(angle = 0, size=rel(2)),
+        axis.text.y = element_text(angle = 0, size=rel(2)),strip.text = element_text(size = rel(2.5)),
+        plot.title = element_text(size = rel(3),hjust = 0.5),legend.text=element_text(size = rel(2)), axis.title = element_text(size = rel(2)),
+        legend.title=element_text(size = rel(2.5)), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  facet_wrap(~hours_label) + ggtitle('Single Cell Motility Distributions')  
+```
+
+```{r CytoplasmicSize, echo=FALSE}
+#cytoplasmic size at 24 hours
+area_cells<-full_meta %>%
+  filter(ImageNumber == 49) 
+
+#plot cytoplasmic area as violin
+ggplot((area_cells), aes(x=AreaShape_Area,y=(treatment), group = treatment, fill = treatment, linetype = treatment )) + xlim(c(0,1200)) + scale_fill_manual(values = combo_cols) +
+  coord_flip() + scale_linetype_manual(values = combo_linetype) + guides(fill=guide_legend(title="Treatment"), linetype = guide_legend(title="Treatment")) +
+  geom_boxplot(outlier.shape = NA) + xlab('Cytoplasmic Area (pixels)') +  theme_bw() + ylab('Treatment')+ 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1,size=rel(2)),
+        axis.text.y = element_text(angle = 0, vjust = 0.5, hjust=1, size=rel(2)),
+        plot.title = element_text(size = rel(2)),legend.text=element_text(size = rel(1)), axis.title = element_text(size = rel(2)),
+        legend.title=element_text(size = rel(2)), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
+
+#replicate level cytoplasmic Size for PLSR model
+cytoplasmic_area_rep<-area_cells %>%
+  group_by(Metadata_Plate, treatment) %>%
+  summarise(average_cytoplasm = mean(AreaShape_Area)) %>%
+  rename('Plate' = Metadata_Plate, 'Treatment' = treatment) %>%
+  mutate(hours = 24)  %>%
+  mutate(Replicate= case_when(
+    grepl("54", Plate)~ 1,
+    grepl("55", Plate) ~ 2,
+    grepl("56", Plate) ~ 3)) 
+```
+
+```{r NearestNeighborDistance, echo=FALSE}
+#calculate Nearest Neighbor Distance
+near_neigh_combo<-full_meta %>%
+  group_by(ImageNumber, Metadata_Field, Metadata_Plate, treatment) %>%
+  do(data.frame(., e=nearest_neighbor_dist(.)))
+
+#summarised to replicate and normalized based on uniform distribution of cells
+near_neigh_combo_well<-near_neigh_combo %>%
+  group_by(ImageNumber, Metadata_Plate, treatment, Metadata_Field) %>%
+  mutate(time = (ImageNumber-1)*30) %>%
+  mutate(hours = time / 60) %>%
+  ungroup() %>%
+  group_by(hours, Metadata_Plate, treatment, Metadata_Field) %>%
+  summarise(second_nearest_neighbor_fld = median(e.secondneighbor), cell_count_field = n()) %>%
+  #calculate the Null model of expected distance based on a random distribution then normalize the distances
+  mutate(size=1408*1040) %>%
+  mutate(null=.5/sqrt(cell_count_field/size)) %>%
+  mutate(count_normed_neighbor = second_nearest_neighbor_fld / null) %>%
+  ungroup() %>%
+  group_by(hours, Metadata_Plate, treatment) %>%
+  summarise(second_nearest_neighbor_normed = median(count_normed_neighbor)) %>%
+  mutate(Replicate= case_when(
+    grepl("54", Metadata_Plate)~ 1,
+    grepl("55", Metadata_Plate) ~ 2,
+    grepl("56", Metadata_Plate) ~ 3)) 
+
+#summarise to treatment
+near_neigh_combo_trt <-near_neigh_combo %>%
+  group_by(ImageNumber, Metadata_Plate, treatment) %>%
+  mutate(time = (ImageNumber-1)*30) %>%
+  mutate(hours = time / 60) %>%
+  ungroup() %>%
+  group_by( treatment, hours) %>%
+  summarise(second_nearest_neighbor_trt = median(e.secondneighbor), trt_neighbor_sd = se(e.secondneighbor)) %>%
+  mutate(trt_neighbor_ci = 1.96*trt_neighbor_sd) %>%
+  mutate(label = if_else(hours == 24, as.character(treatment), NA_character_))%>%
+  mutate(label_x = if_else(hours == 6, 7, NA)) %>%
+  mutate(label_y = if_else(hours == 6, 7, NA)) 
+
+ggplot((near_neigh_combo_trt), aes(x=hours, y=second_nearest_neighbor_trt, group = treatment, color = treatment, linetype = treatment)) + scale_color_manual(values = combo_cols) +
+  geom_line(size = 1.5) +  ylab('Nearest Neighbor Distance') + xlab('Time (hrs)')  + scale_x_continuous(breaks=c(6,12, 18, 24)) + scale_linetype_manual(values = combo_linetype) + expand_limits(x=31.5) + scale_y_continuous(limits = c(17,43)) +
+  labs(color = 'Treatment') + theme_bw() + geom_ribbon(aes(ymin = (second_nearest_neighbor_trt) - (trt_neighbor_ci), ymax = (second_nearest_neighbor_trt) + (trt_neighbor_ci)), linetype=3, alpha=0.1) +
+  theme(axis.text.x = element_text(angle = 0, size=rel(2)),
+        axis.text.y = element_text(angle = 0, vjust = 0.5, hjust=1, size=rel(2)),
+        plot.title = element_text(size = rel(2)),legend.text=element_text(size = rel(1)), axis.title = element_text(size = rel(2)),
+        legend.title=element_text(size = rel(2)), panel.grid.major = element_blank(), panel.grid.minor = element_blank())  +
+  geom_label(aes(label = label, x=label_x, y =label_y),alpha = 1,
+                   na.rm = TRUE)
+
+#replicate level Nearest Neighbor Distance at 24 hours for PLSR
+near_neigh_combo_trt_24<-near_neigh_combo_trt %>%
+  filter(hours == 24) %>%
+  rename('Nearest_Neighbor_Distance' = second_nearest_neighbor_trt, 'Treatment' = treatment) 
+```
+
