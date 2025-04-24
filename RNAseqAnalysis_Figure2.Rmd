@@ -1,0 +1,502 @@
+---
+title: "Figure2_RNAseqAnalysis"
+author: "IM"
+date: "2024-11-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#load libraries
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(ggpmisc)
+library(lsmeans)
+library(readr)
+library(dplyr)
+library(tidyverse)
+library(pls)
+library(Seurat)
+library(gprofiler2)
+library(eulerr)
+library(ComplexHeatmap)
+library(ggpubr)
+library(RColorBrewer)
+library(rlang)
+library(circlize)
+
+#set ligand graphical parameters
+combo_cols<- c(
+  "EGF+OSM" = "violet",
+  "OSM" = "dodgerblue",
+  "EGF" = "red",
+  "EGF+TGFB" = "orange",
+  "OSM+TGFB" = "green4",
+  "TGFB" = "yellow2",
+  "EGF+OSM+TGFB" = "black",
+  "PBS" = "gray65")
+```
+
+```{r Functions, echo=FALSE}
+#define functions for analysis of bulk RNAseq data
+#raw and processed data are available at the Gene Expression Omnibus: GSE282654
+
+#Function to prep differential expression data for upset analysis
+#input is a dataframe of Differential expression p-values and LFC values from DESEQ2
+Set_Analysis_Prep <- function(DE_path, assay, pvalthresh = .05, lfcthresh = 1.5, SetType = 'Anyset', PBS=T){
+  
+  #filter DE data for genes that meet thresholds compared to PBS
+    PBS_filtered<-DE_path %>%
+      filter(padj < pvalthresh) %>%
+      filter(log2FoldChange > lfcthresh | log2FoldChange < (-lfcthresh))
+    return(PBS_filtered)
+  } else if (SetType=='Upset'){
+    PBS_filtered<-PBS_de %>%
+      filter(padj < pvalthresh) %>%
+      filter(log2FoldChange > lfcthresh)
+        return(PBS_filtered)
+  } else if (SetType=='Downset'){
+    PBS_filtered<-PBS_de %>%
+      filter(padj < pvalthresh) %>%
+      filter(log2FoldChange < (-lfcthresh))
+        return(PBS_filtered)
+  } else {
+    stop('Invalid SetType')
+    
+  }
+  
+#function to perform ligand dependent set analysis
+#input is the ouput from the Set_Analysis_Prep function, optionally can upset plot
+Set_Analysis_Ligand_Unique<-function(prepped_DE_data=PBS_filtered, plot=F, unique=T, assay, SetType='Anyset'){
+  
+  #find features only regulated in one ligand condition
+  ligand_summarized<-prepped_DE_data %>%
+    group_by(experimentalCondition) %>%
+    summarise_if(is.numeric, ~ median(., na.rm=TRUE))
+  
+  if(unique==T){
+    ligand_unique_features<-data.frame(ligand_count=colSums(!is.na(ligand_summarized[-c(1)]))) %>%
+      rownames_to_column('Feature') %>%
+      filter(ligand_count<2)
+  } else if(unique==F){
+    ligand_unique_features<-data.frame(ligand_count=colSums(!is.na(ligand_summarized[-c(1)]))) %>%
+      rownames_to_column('Feature') %>%
+      filter(ligand_count>1)
+  }
+  
+  #make dataframe of uniquely regulated features organized by ligand
+  ligand_unique_frame <- ligand_summarized %>%
+    dplyr::select(experimentalCondition, ligand_unique_features$Feature) %>%
+    gather(key=feature, value = 'Log2FoldChange', -experimentalCondition, na.rm = TRUE) %>%
+    arrange(experimentalCondition, desc(Log2FoldChange))
+  
+  if(plot==T){
+    
+    #prepare data for UpsetPlot
+    PBS_data<-ligand_summarized %>%
+      gather(key=feature, value = 'Log2FoldChange', -experimentalCondition, na.rm = TRUE) %>%
+      arrange(experimentalCondition, desc(Log2FoldChange))
+    
+    ligand_list<-unique(PBS_data$experimentalCondition)
+    
+    Upset_list<-list()
+    for(i in 1:length(ligand_list)){
+      ligand_cur=ligand_list[i]
+      
+      ligand_dat <- PBS_data %>%
+        filter(experimentalCondition==ligand_cur)
+      
+      tmp<-list(ligand_dat$feature)
+      Upset_list[ligand_cur]<-tmp
+    }
+    
+    #make upset plot using complexheatmap
+    upset_plot<-make_comb_mat(Upset_list)
+    ligand_unique_frame<- UpSet(upset_plot, column_title = ('Unique Regulated Features'), row_names_gp = grid::gpar(fontsize = 20),comb_order = rev(order(comb_size(upset_plot))))
+    
+  }
+  return(ligand_unique_frame)
+}
+
+```
+
+```{r Data, echo=FALSE}
+#read in differential expression data generated from DESEQ2, all conditions vs PBS control
+#raw and processed data are available at the Gene Expression Omnibus: GSE282654
+seq_files_ls = list.files(pattern="*PBS.csv") 
+seq_files_df <- lapply(seq_files_ls, function(x) {read_csv(file = x)})
+
+#format DE files
+dfs_formatted<-list()
+for(df in 1:length(seq_files_df)){
+  df1<-seq_files_df[[df]]
+  ligand=df1$ligand[1]
+  ligand_lfc= paste0(ligand,'_lfc')
+  ligand_padj = paste0(ligand,'_pdj')
+  ligand_lfc_SE = paste0(ligand,'_lfc_SE')
+  df1_named <- df1 %>%
+    dplyr::select( -gene_biotype, -baseMean,  -ligand, -pvalue) %>%
+    dplyr::rename(!!ligand_lfc:=log2FoldChange) %>%
+    dplyr::rename(!!ligand_lfc_SE:=lfcSE) %>%
+    dplyr::rename(!!ligand_padj:=padj)
+  dfs_formatted[[df]] <-df1_named
+}
+
+#combine DE files
+combined_df <- dfs_formatted %>%
+  purrr::reduce(full_join, by = c('hgnc_symbol', 'ensembl_gene_id')) 
+
+#import phenotypic features from live cell imaging
+#raw data is available at 10.5281/zenodo.14261795
+phenotypic_metrics<-read_csv( 'plsr_metrics.csv')
+
+#Import TF enrichment using priori
+#data is available at https://doi.org/10.1101/2025.04.03.647095 Supplemental Table 1
+priori_results<-read_tsv('priori_activity_scores.tsv')
+```
+
+```{r Set Analysis}
+#Prep data for set analysis
+PBS_filtered<-Set_Analysis_Prep(combined_df)
+
+#Transform dataframe into long dataframe, indicating regulation by the time/condition
+PBS_de_long <- PBS_filtered %>%
+    dplyr::select(experimentalCondition, gene, log2FoldChange) %>%
+    spread(key=gene, value = log2FoldChange) 
+
+#find unique features upregulated or downregulated by each ligand
+ligand_unique_frame<-Set_Analysis_Ligand_Unique<-function(prepped_DE_data=PBS_de_long, plot=F, unique=T, assay, SetType='Anyset')
+
+unique_stacked<- ligand_unique_frame %>%
+  group_by(experimentalCondition) %>%
+  dplyr::summarise(unique=n())
+
+#find shared features
+ligand_shared_frame<-Set_Analysis_Ligand_Unique<-function(prepped_DE_data=PBS_de_long, plot=T, unique=F, assay, SetType='Anyset')
+
+shared_stacked<-ligand_shared_frame %>%
+  group_by(experimentalCondition) %>%
+  dplyr::summarize(shared=n())
+
+#combine counts for plotting
+stacked_combined<-full_join(unique_stacked, shared_stacked) %>%
+  gather(key = 'class', value='count', -experimentalCondition) %>%
+  group_by(experimentalCondition)
+
+#plot upset analysis
+ggplot(stacked_combined, aes( fill= experimentalCondition, y=count, x=experimentalCondition, alpha = class)) +
+geom_bar(position="stack", stat="identity") + scale_fill_manual(values = combo_cols) + theme_bw() + labs(title = 'DE Genes') + labs(fill = "Ligand") + xlab('Ligand') + theme(text=element_text(size=22),axis.text.x = element_text(angle = 45,  hjust=1), panel.border = element_blank(), panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_blank()) + scale_alpha_manual(values = c(shared = .5, unique = 1)) +
+  labs(alpha = "Feature Class") + ylim(0,2500) + ylab('DE Genes') +
+  geom_text(data=stacked_combined, aes( y=count, x=experimentalCondition,label=count), size=8, position = position_stack(),
+            vjust = -.25, show.legend = F) 
+
+```
+
+```{r compare DE genes to change in phenotype, echo= FALSE}
+#calculate the correlation between changes in phenotype and DE gene counts
+#summarise phenotypic data to condition
+condition_phenotypes<-plsr_y_variables %>%
+  group_by(Treatment) %>%
+  summarise_if(is.numeric, median) 
+
+#calculate vector of deviation vs PBS condition for phenotypic change
+condition_phenotype_PBS_normed<-condition_phenotypes %>%
+  full_join(PBS_phenotype) %>%
+  mutate(Replicate_Cell_Count = Replicate_Cell_Count / PBS_Count, slope = slope / PBS_slope, Nearest_Neighbor_Distance = Nearest_Neighbor_Distance / PBS_NN,
+         average_cytoplasm = average_cytoplasm / PBS_cyto) %>%
+  mutate(Deviation_Fom_PBS = sqrt(Replicate_Cell_Count^2 + slope^2 + Nearest_Neighbor_Distance^2 + average_cytoplasm^2)) %>%
+  filter(Treatment != 'PBS')
+
+#bind data to DE gene counts per condition
+phenotype_vs_DEGenes<-cbind(condition_phenotype_PBS_normed, DE_genes_total)
+
+#plot correlation
+ggplot(phenotype_vs_DEGenes, aes(x=Deviation_Fom_PBS, y =DE_genes_total, color = Treatment )) +
+  geom_point( size = 5) + scale_color_manual(values = combo_cols, name = 'Treatment') +  theme_bw() + xlab('Quantified Change in Phenotype') + ylab('Count of DE Genes') +
+  stat_poly_line(inherit.aes = F, aes(x=Deviation_Fom_PBS, y =DE_genes_total), se = T) +
+  theme(axis.text.x = element_text(angle = 0, size=rel(2)),
+        plot.margin = margin(10, 11, 10, 10),
+        axis.text.y = element_text(angle = 0, vjust = 0.5, hjust=1, size=rel(2)),
+        plot.title = element_text(size = rel(2)),legend.text=element_text(size = rel(2)), axis.title = element_text(size = rel(2)),
+        legend.title=element_text(size = rel(2)),  panel.grid.minor = element_blank())
+```
+
+```{r RNAseq Cross Correlation, echo = FALSE}
+#format data and calculate cross correlation between ligand RNAseq conditions
+df_hm <- combined_df %>%
+  dplyr::select(-hgnc_symbol) %>%
+  dplyr::select(-contains('_SE'), -contains('pdj'))  %>%
+  column_to_rownames('ensembl_gene_id') %>%
+  cor(use = "complete.obs")
+
+#draw heatmap
+Heatmap(((corr_mat)), name = "cor", 
+        cell_fun = function(j, i, x, y, width, height, fill) {grid.text(sprintf("%.1f", corr_mat[i, j]), x, y, gp = gpar(fontsize = 14))},
+        show_row_names = TRUE, show_column_names = TRUE, row_dend_side = "right", 
+        show_column_dend = FALSE, 
+        col = colorRamp2(c(-.5,1), scico(2, palette = 'nuuk')),
+        heatmap_legend_param = list(title = "Correlation", labels_gp = gpar( fontsize = 12), title_gp = gpar( fontsize = 14)),
+        column_names_gp = gpar(fontsize = 20),
+        row_names_gp = gpar(fontsize = 20),
+        )
+```
+
+```{r Overall RNAseq Heatmap, echo=FALSE}
+#Plot full heatmap of DE genes across conditions
+#filter differential expression data based on LFC > < 1.5 and p_value <.05
+df_hm_LFC_filter_15<-df_hm %>%
+   dplyr::select(-contains('_SE'), -contains('pdj')) %>%
+   gather(key = 'Condition', value = 'LFC', -ensembl_gene_id) %>%
+   filter(LFC > 1.5 | LFC < (-1.5))
+df_hm_pval_filter_05<-df_hm %>%
+   dplyr::select(-contains('_SE'), -contains('LFC')) %>%
+   gather(key = 'Condition', value = 'adjp', -ensembl_gene_id) %>%
+   filter(adjp < .05)
+
+#filter for the top 200 most upregulated genes
+df_hm_top_de <-  df_hm %>%
+  dplyr::select(-contains('_SE'), -contains('pdj'))%>%
+  filter(ensembl_gene_id %in% df_hm_LFC_filter_15$ensembl_gene_id)%>%
+  group_by(ligand) %>%
+  slice_max(top_n(200))
+
+#select number of clusters for kmeans clustering using gap statistic
+#gqp analysis
+hcluster = clusGap((df_hm_top_de), FUN = kmeans, K.max = 20, B = 500, d.power = 2)
+
+dat <- data.table(hcluster$Tab)
+dat[, k := .I]
+
+# visualize gap statistic
+ggplot(dat, aes(k, gap)) + geom_line() + geom_point(size = 3) +
+  geom_errorbar(aes(ymax = gap + SE.sim, ymin = gap - SE.sim), width = 0.25) +
+  ggtitle("Clustering Results") +
+  labs(x = "Number of Clusters", y = "Gap Statistic") +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 14), axis.title.x = element_text(size = 16),
+        axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 16),
+        plot.title = element_text(size = 20, face = "bold", color = "darkgreen"), legend.text = element_text(size=18), strip.text = element_text(size=20)) + geom_vline(xintercept =10, linetype="dotted")
+
+#select maxSE cluster number
+maxSE(hcluster$Tab[, 'gap'], hcluster$Tab[, 'SE.sim'],
+      method = c("firstSEmax"))
+
+#Create the heatmap
+Heatmap(matrix = df_hm_top_de,
+              name = "LFC",
+              column_title = 'Combination Ligand RNAseq',
+              show_row_names = F,
+              show_column_names = T,
+              show_row_dend = F,
+              show_column_dend = F,
+              cluster_columns = F,
+              row_km = 10,
+              row_km_repeats = 100,
+              cluster_rows = T,
+              na_col = "grey",
+              heatmap_legend_param = list(labels_gp = gpar( fontsize = 12), title_gp = gpar( fontsize = 12)),
+              column_names_gp = gpar(fontsize = 10),
+            row_title = c(1:10),              
+            row_names_gp = gpar(fontsize = 10))
+
+#extract gene lists from kmeans clustering
+r.dend <- row_dend(ht)  #Extract row dendrogram
+cl.list <- row_order(ht)  #Extract clusters (output is a list)
+lapply(cl.list, function(x) length(x))  #check/confirm size clusters
+rm(clu)
+rm(out)
+
+# loop to extract genes for each cluster.
+for (i in 1:length(row_order(ht))){
+    if (i == 1) {
+      clu <- t(t(row.names(df_as_matrix[row_order(ht)[[i]],])))
+      out <- cbind(clu, paste("cluster", i, sep=""))
+      colnames(out) <- c("GeneID", "Cluster")
+       } else {
+        clu <- t(t(row.names(df_as_matrix[row_order(ht)[[i]],])))
+        clu <- cbind(clu, paste("cluster", i, sep=""))
+        out <- rbind(out, clu)
+         }
+     }
+j<-as.data.frame(out)
+
+#assess GO enrichment for each module and make bubble plot of enrichment analysis 
+list_of_gsea_dfs<-list()
+for(cluster in 1:length(unique(out_lab$Cluster))){
+  cluster<-unique(out_lab$Cluster)[cluster]
+  genes<-out_lab %>%
+    filter(Cluster == 'cluster5') 
+  gene_vector<-genes$ensembl_gene_id
+  gsea <- gost(query = gene_vector, 
+               organism = "hsapiens", ordered_query = FALSE, 
+               multi_query = FALSE, significant = TRUE, 
+               user_threshold = 0.5, correction_method = "g_SCS", 
+               numeric_ns = "", sources = "GO:BP", as_short_link = FALSE, highlight = TRUE)
+  gsea_df<-gsea[["result"]]
+  list_of_gsea_dfs[[cluster]]<-gsea_df
+}
+
+#filter GSEA results to top 3 terms for each cluster, as defined by p_value and generatio
+top3_q01<-unlist(list_of_gsea_dfs) %>%
+  group_by(cluster) %>%
+  arrange(p_value) %>%
+  top_n(wt = p_value, n=-3) %>%
+  slice_max(order_by = gene_ratio, n = 3) 
+
+#and filter terms with p_value <.01
+gsea_cutoff<-combined_gsea %>%
+  filter(term_name %in% 
+           top3_q01$term_name) %>%
+  mutate(log_p_value = -log(p_value)) %>%
+  filter(p_value < .005) %>%
+  mutate(description_order = factor(term_name, levels = unique(gsea_cutoff$term_name)))
+                                                            
+#plot bubble chart
+ggplot(gsea_cutoff, aes(x=(name), y= description_order, size=gene_ratio,  color = p_value)) +
+  geom_point()   + 
+  expand_limits(x=0) + theme_bw()  + scale_color_continuous(trans='reverse')  + scale_size_continuous(range = c(1, 15)) +
+  scale_y_discrete(limits=rev,labels = function(x) stringr::str_wrap(x, width = 30)) + 
+  labs(x="Gene Module", y="",  size="Gene Ratio", color = 'Adj p-value') +
+  theme(text=element_text(size=30), axis.title.x = element_blank(), axis.text.x = element_text(size = 35, angle = 45, hjust = 1, vjust=.95), axis.text.y = element_text(size = 35, hjust = 1))
+
+#make heatmap for median expression of each cluster per condition
+median_expression_join<-df_hm_top_de %>%
+  left_join(out_lab) %>%
+  dplyr::select(-ensembl_gene_id) %>%
+  gather(key = Treatment, value = LFC, -Cluster) %>%
+  group_by(Treatment, Cluster) %>%
+  dplyr::summarise(median_LFC = median(LFC))
+
+#format data  
+median_lfc_spread<-median_expression_join %>%
+  dplyr::select(-Cluster) %>%
+  spread(key = name, value = median_LFC) %>%
+  column_to_rownames('Treatment') 
+
+hm_med_exp<-Heatmap(matrix = median_lfc_spread,
+            name = "Median LFC",
+            show_row_names = T,
+            show_column_names = T,
+            show_row_dend = T,
+            col = colorRamp2(c(7,0,-7), scico(3, palette = 'bam')),
+            show_column_dend = F,
+            cluster_columns = F,
+            cluster_rows = F,
+            na_col = "grey",
+            heatmap_height = unit(2, "cm")*nrow(median_lfc_spread),
+            heatmap_legend_param = list(labels_gp = gpar( fontsize = 16), title_gp = gpar( fontsize = 18)),
+            column_title_gp = gpar(fontsize = 23),
+            column_names_rot = 45,
+            column_names_gp = gpar(fontsize = 20),
+            row_names_gp = gpar(fontsize = 20))
+
+```
+
+```{r TF enrichment analysis, echo=FALSE}
+#analyse and plot TF enrichment for ligand conditions, enrichment scores were calculate using Priori
+#median summarise data to treatment
+priori_condition<-priori_results %>%
+  group_by(Treatment) %>%
+  summarise_if(is.numeric, median)
+
+#top decile of most active TFs in each condition
+priori_condition_top_10<-priori_condition %>%
+  gather(key = 'TF', value = 'Enrichment_Score', -Treatment) %>%
+  group_by(Treatment) %>%
+  filter(Treatment != 'CTRL' & Treatment != 'PBS') %>%
+  arrange(desc(Enrichment_Score)) %>%
+  top_n(n = 10)
+
+#format data
+priori_top10_hm<-priori_condition %>%
+  select(Treatment, priori_condition_top_10$TF) %>%
+  filter(Treatment != 'CTRL' & Treatment != 'PBS')%>% 
+  arrange(factor(Treatment, levels = c('EGF', 'OSM', 'TGFB', 'EGF_OSM', 'EGF_TGFB', 'OSM_TGFB', 'EGF_OSM_TGFB'))) %>%
+  column_to_rownames('Treatment') %>%
+  as.matrix() %>%
+  t
+colnames(priori_top10_hm)<-c('EGF', 'OSM', 'TGFB', 'EGF+OSM', 'EGF+TGFB', 'OSM+TGFB', 'EGF+OSM+TGFB')
+
+#plot heatmap
+Heatmap(matrix = priori_top10_hm,
+        name = "Enrichment_Score",
+        column_title = 'Top Decile TF per Treatment',
+        show_row_names = T,
+        show_column_names = T,
+        show_row_dend = T,
+        show_column_dend = T,
+        cluster_columns = T,
+        cluster_rows = T,
+        #col = colorRamp2(c(-2.5,0,2,5)),
+        na_col = "grey",
+        heatmap_legend_param = list(labels_gp = gpar( fontsize = 12), title_gp = gpar( fontsize = 14)),
+        column_title_gp = gpar(fontsize = 23),
+        show_heatmap_legend = FALSE,
+        column_names_rot = 45,
+        column_names_gp = gpar(fontsize = 20),
+        row_names_gp = gpar(fontsize = 17))
+
+#heatmap of canonical activation
+priori_canonical<-priori_condition %>%
+  select(Treatment, STAT3, SMAD3, SMAD4,  MAPK1, MAPK3, AKT1)  %>%
+  filter(Treatment != 'CTRL' & Treatment != 'PBS') %>% 
+  arrange(factor(Treatment, levels = c('EGF', 'OSM', 'TGFB', 'EGF_OSM', 'EGF_TGFB', 'OSM_TGFB', 'EGF_OSM_TGFB')))
+
+priori_canonical_hm<-priori_canonical %>%
+  column_to_rownames('Treatment') %>%
+  as.matrix() %>%
+  t
+
+Heatmap(matrix = priori_canonical_hm,
+        name = "Enrichment Score",
+        column_title = 'Canonical TF Enrichment',
+        show_row_names = T,
+        show_column_names = T,
+        show_row_dend = T,
+        show_column_dend = T,
+        cluster_columns = F,
+        cluster_rows = T,
+        #col = colorRamp2(c(-2.5,0,2,5)),
+        na_col = "grey",
+        heatmap_legend_param = list(labels_gp = gpar( fontsize = 16), title_gp = gpar( fontsize = 18)),
+        column_title_gp = gpar(fontsize = 23),
+        column_names_gp = gpar(fontsize = 20),
+        column_names_rot = 45,
+        row_names_gp = gpar(fontsize = 17, fontface = 'bold'))
+
+#upset plot of active TFs
+#make upset of top decile most enriched for each condition
+EGF_priori_up<-priori_dist %>%
+  slice_max(EGF, n = 11)
+EGF_OSM_priori_up<-priori_dist %>%
+  slice_max(EGF_OSM , n = 11)
+EGF_OSM_TGFB_priori_up<-priori_dist %>%
+  slice_max(EGF_OSM_TGFB , n = 11)
+OSM_priori_up<-priori_dist %>%
+  slice_max(OSM , n = 11)
+OSM_TGFB_priori_up<-priori_dist %>%
+  slice_max(OSM_TGFB , n = 11)
+TGFB_priori_up<-priori_dist %>%
+  slice_max(TGFB , n = 11)
+EGF_TGFB_priori_up<-priori_dist %>%
+  slice_max(EGF_TGFB , n = 11)
+
+priori_upset<-list(EGF = EGF_priori_up$TF,OSM = OSM_priori_up$TF, TGFB = TGFB_priori_up$TF, `EGF+OSM` = EGF_OSM_priori_up$TF, 
+                   `EGF+TGFB` = EGF_TGFB_priori_up$TF,  `OSM+TGFB` = OSM_TGFB_priori_up$TF ,`EGF+OSM+TGFB` = EGF_OSM_TGFB_priori_up$TF
+                   )
+
+priori_upset_mat<-make_comb_mat(priori_upset)
+UpSet(priori_upset_mat,   
+    comb_order = order(comb_size(priori_upset_mat)),
+    pt_size = unit(10, "pt"),
+    lwd = unit(5, "pt"),
+    top_annotation = upset_top_annotation(priori_upset_mat, axis_param = list(gp = gpar(fontsize = 16)),annotation_name_gp = gpar(fontsize = 18), height = unit(150, "pt")),
+   # right_annotation = NA,
+    show_row_names = TRUE,
+    row_names_gp = gpar(fontsize = 18) #changes font size of "set size" labels
+ )
+```
+
