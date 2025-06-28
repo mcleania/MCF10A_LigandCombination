@@ -21,17 +21,20 @@ library(rlang)
 library(circlize)
 library(gprofiler2)
 library(ComplexHeatmap)
+library(Seurat)
+library(biomaRt)
 ```
 
 ```{r Functions, echo=FALSE}
 #define functions for exploring PLSR model in murine mammary development scRNAseq data
-#data is from https://doi.org/10.1038/ncomms9487.
+#data is from https://doi.org/10.1186/s13058-021-01445-4
 
 #Function to prep scRNAseq data for PLSR signature analysis
 prep_GSE<-function(directory=dir, dev_stage=stage){
-  dat <- Read10X(data.dir = "dir")
+  dat <- Read10X(data.dir = directory)
   dat_s <- CreateSeuratObject(counts = dat, project = "Visvader_Dev", min.cells = 3, min.features = 200)
-  dat_s[["Developmental_Stage"]] <- stage
+  dat_s[["Developmental_Stage"]] <- dev_stage
+  return(dat_s)
 }
 
 ```
@@ -82,9 +85,9 @@ p1 + p2
 
 ```{r expression of PLSR signatures}
 #read in VIP signatures for migration and cell count PLSR
-#data is available at https://doi.org/10.1101/2025.04.03.647095 Supplemental Table 2,3
-proliferation_geneset<-read_csv('count_vips_500.csv')
-migration_geneset<-read_csv('slope_vips.csv')
+#data is available on https://github.com/mcleania/MCF10A_LigandCombination data directory
+proliferation_geneset<-read_csv('Data/PLSR_VIP_Scores/CellCount_VIP_scores.csv')
+migration_geneset<-read_csv('Data/PLSR_VIP_Scores/Motility_VIP_scores.csv')
 
 #convert genes in plsr models to mouse orthologs 
 human = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
@@ -105,8 +108,7 @@ proliferation_module<-proliferation_geneset %>%
 migration_module<-migration_geneset%>%
   select('hgnc_symbol') %>%
   left_join(merge_dat) %>%
-  filter(mmusculus_homolog_associated_gene_name !='') %>%
-  filter(mmusculus_homolog_associated_gene_name %notin% t)
+  filter(mmusculus_homolog_associated_gene_name !='') 
 
 #Add module scores
 dat_combined <- AddModuleScore(
@@ -126,7 +128,7 @@ dat_combined <- AddModuleScore(
 #Violin and feature plot of module scores by developmental stage
 VlnPlot(dat_combined, features = c('Proliferation_module1'), group.by = 'Developmental_Stage', raster = FALSE, pt.size = 0)
 
-FeaturePlot(dat_combined, features = c('Proliferation_module_top1'), raster = F, split.by = 'Developmental_Stage')
+FeaturePlot(dat_combined, features = c('Proliferation_module_top1'), raster = F, split.by = 'Developmental_Stage') & scale_color_gradientn(colors = scico(palette = 'vik', n = 4, direction = 1))
 
 #find basal markers
 basal_markers<-FindMarkers(dat_combined, ident.1 = 'Basal', only.pos = T)
@@ -138,6 +140,55 @@ overlap_prolif_basal<-proliferation_module_full %>%
 #heatmap of shared markers
 DoHeatmap(dat_combined, features = overlap_prolif_basal$mmusculus_homolog_associated_gene_name[1:20]) +
   theme(plot.margin = margin(0,2,0,1.5, "cm"))
+
+```
+
+```{r Ductal Epithelium Analysis, echo=FALSE}
+#investigate ductal epithelium in puberty
+Puberty_Ducts_s<-dat_3
+
+#renormalize data
+Puberty_Ducts_s[["percent.mt"]] <- PercentageFeatureSet(Puberty_Ducts_s, pattern = "^MT-")
+Puberty_Ducts_s <- subset(Puberty_Ducts_s, subset = nFeature_RNA > 2000)
+Puberty_Ducts_s <- NormalizeData(Puberty_Ducts_s)
+Puberty_Ducts_s <- FindVariableFeatures(Puberty_Ducts_s, selection.method = "vst", nfeatures = 2000)
+all.genes <- rownames(Puberty_Ducts_s)
+Puberty_Ducts_s <- ScaleData(Puberty_Ducts_s, features = all.genes)
+
+#dimensional reduction
+Puberty_Ducts_s <- RunPCA(Puberty_Ducts_s, features = VariableFeatures(object = Puberty_Ducts_s))
+Puberty_Ducts_s <- JackStraw(Puberty_Ducts_s, num.replicate = 100)
+Puberty_Ducts_s <- ScoreJackStraw(Puberty_Ducts_s)
+Puberty_Ducts_s <- FindNeighbors(Puberty_Ducts_s, dims = 1:20)
+Puberty_Ducts_s <- FindClusters(Puberty_Ducts_s, resolution = .05)
+Puberty_Ducts_s <- RunUMAP(Puberty_Ducts_s, dims = 1:20)
+
+#visualize clusters
+DimPlot(Puberty_Ducts_s, reduction = "umap")
+
+#rename clusters based on cell markers
+cluster.ids <- c("Basal", "Mature Luminal", "Luminal Progenitors") 
+names(cluster.ids) <- levels(Puberty_Ducts_s)
+Puberty_Ducts_s <- RenameIdents(Puberty_Ducts_s, cluster.ids)
+
+#add PLSR module scores
+Puberty_Ducts_s <- AddModuleScore(
+  object = Puberty_Ducts_s,
+  features = proliferation_module_full$mmusculus_homolog_associated_gene_name,
+  name = 'Proliferation_module_full'
+)
+Puberty_Ducts_s <- AddModuleScore(
+  object = Puberty_Ducts_s,
+  features = migration_module_full$mmusculus_homolog_associated_gene_name,
+  name = 'Migration_module_full'
+)
+
+#violin plot of module expression
+VlnPlot(Puberty_Ducts_s, features = c('Proliferation_module_full1'), raster = FALSE, pt.size = 0) 
+
+#feature plot of module expression
+FeaturePlot(Puberty_Ducts_s, features = c('Proliferation_module_full1'), raster = F, label = T, min.cutoff = -1, max.cutoff = 1) & scale_color_gradientn(colors = scico(palette = 'vik', n = 4, direction = 1))
+
 
 ```
 
