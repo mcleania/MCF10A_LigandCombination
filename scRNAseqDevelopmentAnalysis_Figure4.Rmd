@@ -23,6 +23,7 @@ library(gprofiler2)
 library(ComplexHeatmap)
 library(Seurat)
 library(biomaRt)
+library(scico)
 ```
 
 ```{r Functions, echo=FALSE}
@@ -37,6 +38,7 @@ prep_GSE<-function(directory=dir, dev_stage=stage){
   return(dat_s)
 }
 
+`%notin%` <- Negate(`%in%`)
 ```
 
 ```{r Data, echo=FALSE}
@@ -89,57 +91,76 @@ p1 + p2
 proliferation_geneset<-read_csv('Data/PLSR_VIP_Scores/CellCount_VIP_scores.csv')
 migration_geneset<-read_csv('Data/PLSR_VIP_Scores/Motility_VIP_scores.csv')
 
+#filter for top positively correlated VIPS
+proliferation_geneset<-proliferation_geneset %>%
+  filter(`combo_Y_proliferation.1 comps` > 0) %>%
+  top_n(n=500, wt = VIP_SCORE)
+
+migration_geneset<-migration_geneset %>%
+  filter(`combo_Y_slope.1 comps` > 0) %>%
+  top_n(n=500, wt = VIP_SCORE)
+
 #convert genes in plsr models to mouse orthologs 
 human = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
 mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl")
-mgi2ensembl<-getBM(attributes = c('hgnc_symbol', 'ensembl_gene_id'), mart = human, value = proliferation_geneset$hgnc_symbol)
+mgi2ensembl<-getBM(attributes = c('hgnc_symbol', 'ensembl_gene_id'), mart = human, values = proliferation_geneset$ensembl_gene_id)
 ensembl2hgnc <- getBM(attributes = c("mmusculus_homolog_associated_gene_name", "ensembl_gene_id"), 
                         filters = "ensembl_gene_id", 
                         mart = human, 
                         value = mgi2ensembl$ensembl_gene_id)
 merge_dat<-merge(mgi2ensembl, ensembl2hgnc)
 
-#trim PLSR signature genes to genes with a mouse ortholog
 proliferation_module<-proliferation_geneset %>%
-  select('hgnc_symbol') %>%
+  #select('hgnc_symbol') %>%
   left_join(merge_dat) %>%
   filter(mmusculus_homolog_associated_gene_name !='') 
 
 migration_module<-migration_geneset%>%
-  select('hgnc_symbol') %>%
+ # select('hgnc_symbol') %>%
   left_join(merge_dat) %>%
   filter(mmusculus_homolog_associated_gene_name !='') 
 
+#trim PLSR signature genes to genes with a mouse ortholog contained in most variable genes in mouse dataset
+t_prolif<-setdiff(proliferation_module$mmusculus_homolog_associated_gene_name, rownames(dat_combined))
+t_migration<-setdiff(migration_module$mmusculus_homolog_associated_gene_name, rownames(dat_combined))
+
+DefaultAssay(dat_combined)<-'integrated'
+top10 <- head(VariableFeatures(dat_combined), 1000)
+
+proliferation_module<-proliferation_geneset %>%
+  #select('hgnc_symbol') %>%
+  left_join(merge_dat) %>%
+  filter(mmusculus_homolog_associated_gene_name !='') %>%
+  filter(mmusculus_homolog_associated_gene_name %notin% t_prolif)%>%
+  filter(mmusculus_homolog_associated_gene_name %in% top10)
+
+migration_module<-migration_geneset%>%
+ # select('hgnc_symbol') %>%
+  left_join(merge_dat) %>%
+  filter(mmusculus_homolog_associated_gene_name !='') %>%
+  filter(mmusculus_homolog_associated_gene_name %notin% t_migration)%>%
+  filter(mmusculus_homolog_associated_gene_name %in% top10)
+
 #Add module scores
+dat_combined_new = JoinLayers(dat_combined)
+DefaultAssay(dat_combined)<-'RNA'
+
 dat_combined <- AddModuleScore(
   object = dat_combined,
   features = proliferation_module$mmusculus_homolog_associated_gene_name,
-  ctrl = 5,
-  name = 'Proliferation_module'
+  name = 'Proliferation_module_n',
+  ctrl = 75
 )
 
 dat_combined <- AddModuleScore(
   object = dat_combined,
   features = migration_module$mmusculus_homolog_associated_gene_name,
-  ctrl = 5,
-  name = 'Migration_module'
+  name = 'Migration_module',
+  ctrl = 75
 )
 
 #Violin and feature plot of module scores by developmental stage
 VlnPlot(dat_combined, features = c('Proliferation_module1'), group.by = 'Developmental_Stage', raster = FALSE, pt.size = 0)
-
-FeaturePlot(dat_combined, features = c('Proliferation_module_top1'), raster = F, split.by = 'Developmental_Stage') & scale_color_gradientn(colors = scico(palette = 'vik', n = 4, direction = 1))
-
-#find basal markers
-basal_markers<-FindMarkers(dat_combined, ident.1 = 'Basal', only.pos = T)
-
-#overlap of markers in cell count signature
-overlap_prolif_basal<-proliferation_module_full %>%
-  filter(mmusculus_homolog_associated_gene_name %in% rownames(basal_markers[1:1600,]))
-
-#heatmap of shared markers
-DoHeatmap(dat_combined, features = overlap_prolif_basal$mmusculus_homolog_associated_gene_name[1:20]) +
-  theme(plot.margin = margin(0,2,0,1.5, "cm"))
 
 ```
 
@@ -172,23 +193,53 @@ names(cluster.ids) <- levels(Puberty_Ducts_s)
 Puberty_Ducts_s <- RenameIdents(Puberty_Ducts_s, cluster.ids)
 
 #add PLSR module scores
+top10 <- head(VariableFeatures(Puberty_Ducts_s), 1000)
+
+proliferation_module<-proliferation_geneset %>%
+  #select('hgnc_symbol') %>%
+  left_join(merge_dat) %>%
+  filter(mmusculus_homolog_associated_gene_name !='') %>%
+  filter(mmusculus_homolog_associated_gene_name %notin% t_prolif)%>%
+  filter(mmusculus_homolog_associated_gene_name %in% top10)
+
+migration_module<-migration_geneset%>%
+ # select('hgnc_symbol') %>%
+  left_join(merge_dat) %>%
+  filter(mmusculus_homolog_associated_gene_name !='') %>%
+  filter(mmusculus_homolog_associated_gene_name %notin% t_migration)%>%
+  filter(mmusculus_homolog_associated_gene_name %in% top10)
+
 Puberty_Ducts_s <- AddModuleScore(
   object = Puberty_Ducts_s,
-  features = proliferation_module_full$mmusculus_homolog_associated_gene_name,
-  name = 'Proliferation_module_full'
+  features = proliferation_module$mmusculus_homolog_associated_gene_name,
+  name = 'Proliferation_module'
 )
 Puberty_Ducts_s <- AddModuleScore(
   object = Puberty_Ducts_s,
-  features = migration_module_full$mmusculus_homolog_associated_gene_name,
-  name = 'Migration_module_full'
+  features = migration_module$mmusculus_homolog_associated_gene_name,
+  name = 'Migration_module'
 )
 
 #violin plot of module expression
-VlnPlot(Puberty_Ducts_s, features = c('Proliferation_module_full1'), raster = FALSE, pt.size = 0) 
+VlnPlot(Puberty_Ducts_s, features = c('Proliferation_module1'), raster = FALSE, pt.size = 0) 
 
 #feature plot of module expression
-FeaturePlot(Puberty_Ducts_s, features = c('Proliferation_module_full1'), raster = F, label = T, min.cutoff = -1, max.cutoff = 1) & scale_color_gradientn(colors = scico(palette = 'vik', n = 4, direction = 1))
+FeaturePlot(Puberty_Ducts_s, features = c('Proliferation_module1'), raster = F, label = T, min.cutoff = -1, max.cutoff = 1) & scale_color_gradientn(colors = scico(palette = 'vik', n = 4, direction = 1))
 
+#find overlap between basal markers and cell count signature
+basal_markers<-FindMarkers(Puberty_Ducts_s, ident.1 = 'Basal', only.pos = T)
+
+overlap_prolif_basal<-proliferation_module %>%
+  filter(mmusculus_homolog_associated_gene_name %in% rownames(basal_markers[1:1600,]))
+
+overlap_prolif_ml_order<-basal_markers%>%
+  rownames_to_column('symbol') %>%
+  filter(symbol %in% overlap_prolif_basal$mmusculus_homolog_associated_gene_name) %>%
+  arrange(desc(avg_log2FC))
+
+
+t<-DoHeatmap(Puberty_Ducts_s, features = overlap_prolif_ml_order$symbol[1:20]) +
+  theme(plot.margin = margin(0,2,0,1.5, "cm"))
 
 ```
 
