@@ -52,14 +52,14 @@ identify_synergy<-function(Combo_DE_File1, Combo_DE_File2, condition1 = 'EGF', c
   comparison1_pval = paste0('Combo_vs_',condition1,'_pval')
   
   file1_dge<-Combo_DE_File1 %>%
-  rename(!!comparison1:=hgnc_symbol, log2FoldChange, !!comparison1_pval:=padj) %>%
+  rename(!!comparison1:=log2FoldChange, !!comparison1_pval:=padj) %>%
   dplyr::select(ensembl_gene_id,hgnc_symbol,!!comparison1,!!comparison1_pval)
   
   comparison2 = paste0('Combo_vs_',condition2)
   comparison2_pval = paste0('Combo_vs_',condition2,'_pval')
   
   file2_dge<-Combo_DE_File2 %>%
-  rename(!!comparison2:=hgnc_symbol, log2FoldChange, !!comparison2_pval:=padj) %>%
+  rename(!!comparison2:=log2FoldChange, !!comparison2_pval:=padj) %>%
   dplyr::select(ensembl_gene_id,hgnc_symbol,!!comparison2,!!comparison2_pval)
   
   #combine data
@@ -70,20 +70,20 @@ identify_synergy<-function(Combo_DE_File1, Combo_DE_File2, condition1 = 'EGF', c
   combo_dge_15lfc<-combo_dge
 
   combo_1_dge_15_up<- combo_dge_15lfc %>%
-    filter(!!comparison1 > 1.5 & !!comparison1_pval < .05) 
+    filter(!!as.symbol(comparison1) > 1.5 & !!as.symbol(comparison1_pval) < .05) 
 
   combo_1_dge_15_down<-combo_dge_15lfc %>%
-    filter(!!comparison1 < (-1.5) & !!comparison1_pval < .05) 
+    filter(!!as.symbol(comparison1) < (-1.5) & !!as.symbol(comparison1_pval) < .05) 
 
   combo_2_dge_15_up<-combo_dge_15lfc %>%
-    filter(!!comparison2 > 1.5 & !!comparison2_pval < .05) 
+    filter(!!as.symbol(comparison2) > 1.5 & !!as.symbol(comparison2_pval) < .05) 
 
   combo_2_dge_15_down<-combo_dge_15lfc %>%
-    filter(!!comparison2 < (-1.5) & !!comparison2_pval < .05) 
+    filter(!!as.symbol(comparison2) < (-1.5) & !!as.symbol(comparison2_pval) < .05) 
 
   #label synergistic genes
   combo_label<-combo_dge %>%
-    mutate(label = ifelse(ensembl_gene_id %in% combo_1_dge_15_up$ensembl_gene_id & ensembl_gene_id %in% test = combo_2_dge_15_up$ensembl_gene_id, 'Positively Synergistic',ifelse(ensembl_gene_id %in% combo_1_dge_1_down$ensembl_gene_id & ensembl_gene_id %in% combo_2_dge_1_down$ensembl_gene_id, 'Negatively Synergistic', 'n')))
+    mutate(label = ifelse(ensembl_gene_id %in% combo_1_dge_15_up$ensembl_gene_id & ensembl_gene_id %in% combo_2_dge_15_up$ensembl_gene_id, 'Positively Synergistic',ifelse(ensembl_gene_id %in% combo_1_dge_15_down$ensembl_gene_id & ensembl_gene_id %in% combo_2_dge_15_down$ensembl_gene_id, 'Negatively Synergistic', 'n')))
   
   return(combo_label)
 }
@@ -91,21 +91,20 @@ identify_synergy<-function(Combo_DE_File1, Combo_DE_File2, condition1 = 'EGF', c
 
 ```{r Data, echo=FALSE}
 #read in differential expression data generated from DESEQ2, all combination conditions vs respective single ligands
-egf_egfosm_dge<-read_csv('MDD_ligandCombination_RNAseq_DETable_allGenes_EGF_OSM_vs_EGF.csv')
-osm_egfosm_dge<-read_csv('MDD_ligandCombination_RNAseq_DETable_allGenes_EGF_OSM_vs_OSM.csv')
-tgfb_egftgfb_dge<-read_csv('MDD_ligandCombination_RNAseq_DETable_allGenes_EGF_TGFB_vs_EGF.csv')
-egf_egftgfb_dge<-read_csv('MDD_ligandCombination_RNAseq_DETable_allGenes_EGF_TGFB_vs_TGFB.csv')
-tgfb_osmtgfb_dge<-read_csv('MDD_ligandCombination_RNAseq_DETable_allGenes_OSM_TGFB_vs_OSM.csv')
-osm_osmtgfb_dge<-read_csv('MDD_ligandCombination_RNAseq_DETable_allGenes_OSM_TGFB_vs_OSM.csv')
+egf_egfosm_dge<-read_csv('Data/RNAseq_DGE_Files/vs_CombinationConditions/MDD_ligandCombination_RNAseq_DETable_allGenes_EGF_OSM_vs_EGF.csv')
+osm_egfosm_dge<-read_csv('Data/RNAseq_DGE_Files/vs_CombinationConditions/MDD_ligandCombination_RNAseq_DETable_allGenes_EGF_OSM_vs_OSM.csv')
+tgfb_egftgfb_dge<-read_csv('Data/RNAseq_DGE_Files/vs_CombinationConditions/MDD_ligandCombination_RNAseq_DETable_allGenes_EGF_TGFB_vs_TGFB.csv')
+egf_egftgfb_dge<-read_csv('Data/RNAseq_DGE_Files/vs_CombinationConditions/MDD_ligandCombination_RNAseq_DETable_allGenes_EGF_TGFB_vs_EGF.csv')
+tgfb_osmtgfb_dge<-read_csv('Data/RNAseq_DGE_Files/vs_CombinationConditions/MDD_ligandCombination_RNAseq_DETable_allGenes_OSM_TGFB_vs_TGFB.csv')
+osm_osmtgfb_dge<-read_csv('Data/RNAseq_DGE_Files/vs_CombinationConditions/MDD_ligandCombination_RNAseq_DETable_allGenes_OSM_TGFB_vs_OSM.csv')
 ```
 
 ```{r Plot Synergyistic Genes}
 EGF_OSM_synergy<-identify_synergy(Combo_DE_File1 = egf_egfosm_dge, Combo_DE_File2 = osm_egfosm_dge, condition1 = 'EGF', condition2 = 'OSM',combocondition = 'EGF_OSM')
 
-ggplot(combo_label_eo, aes(x=Combo_vs_EGF_LFC, y =Combo_vs_OSM_LFC, color = label)) +
+ggplot(EGF_OSM_synergy, aes(x=Combo_vs_EGF, y =Combo_vs_OSM, color = label)) +
   geom_point(size=2, alpha=.6) + xlab('EGF+OSM vs EGF LFC') + ylab('EGF+OSM vs OSM LFC') + scale_color_manual(values = cols, breaks = c('Positively Synergistic - 17 Genes','Negatively Synergistic - 148 Genes')) + ylim(-11, 11) + xlim(-11,11) + theme_bw() + geom_vline(xintercept =0, linetype = 2 ) + geom_hline(yintercept = 0, linetype = 2) + theme(text = element_text(size=21),legend.text = element_text(size=14), legend.position = c(.75, .95),legend.title=element_blank(), panel.grid.major = element_blank(), legend.key = element_rect(fill = "transparent", colour = "transparent"),legend.background = element_rect(fill = NA),panel.grid.minor = element_blank()) + 
   ggtitle('EGF + OSM') + theme(plot.title = element_text(hjust = 0.5)) + coord_fixed()
-
 
 #make Venn of overlaps between synergistic and repressed gene sets
 
