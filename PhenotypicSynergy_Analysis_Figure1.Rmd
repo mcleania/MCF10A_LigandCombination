@@ -18,13 +18,13 @@ library(lsmeans)
 
 #set ligand graphical parameters
 combo_cols<- c(
-  "EGF+OSM" = "violet",
+  "EGF_OSM" = "violet",
   "OSM" = "dodgerblue",
   "EGF" = "red",
-  "EGF+TGFB" = "orange",
-  "OSM+TGFB" = "green4",
+  "EGF_TGFB" = "orange",
+  "OSM_TGFB" = "green4",
   "TGFB" = "yellow2",
-  "EGF+OSM+TGFB" = "black",
+  "EGF_OSM_TGFB" = "black",
   "PBS" = "gray65")
 ```
 
@@ -33,7 +33,7 @@ combo_cols<- c(
 #data is available at 10.5281/zenodo.14261795
 
 #Calculate mean squared displacement over timmecourse imaging
-Phenotype_StatTest <- function(summarised_phenotypic_data, combination_condition = c('EGF_OSM'), phenotype = 'Replicate_Cell_Count'){
+Phenotype_StatTest <- function(summarised_phenotypic_data=plsr_y_variables, combination_condition = c('EGF_OSM'), phenotype = 'Replicate_Cell_Count'){
   
   #filter for condition
  condition_test<- plsr_y_variables %>%
@@ -62,62 +62,66 @@ Phenotype_StatTest <- function(summarised_phenotypic_data, combination_condition
 
 ```{r Data, echo=FALSE}
 #read in phenotypic quantifications 
-#data is available at 10.5281/zenodo.14261795
-plsr_y_variables<-read_csv( 'plsr_metrics.csv')
+#data is available at 10.5281/zenodo.14261795 and summarised metrics are available in the repository
+plsr_y_variables_lfc<-read_csv( 'Data/Phenotypic_Metrics/Phenotypic_Metrics_LFC.csv')
+plsr_y_variables<-read_csv( 'Data/Phenotypic_Metrics/Phenotypic_Metrics.csv')
 
 #format comparisons between each ligand combination and the respective single ligand conditions
-egf_osm_div<-plsr_y_variables %>%
+egf_osm_div<-plsr_y_variables_lfc %>%
   filter(Comparison == 'EGF_OSM_vs_EGF' | Comparison == 'EGF_OSM_vs_OSM') %>%
   dplyr::select(-Plate) %>%
   gather(key = 'Phenotype', value = 'Log2_FC', -Comparison) 
 
-egf_tgfb_div<-plsr_y_variables %>%
+egf_tgfb_div<-plsr_y_variables_lfc %>%
   filter(Comparison == 'EGF_TGFB_vs_EGF' | Comparison == 'EGF_TGFB_vs_TGFB') %>%
   dplyr::select(-Plate) %>%
   gather(key = 'Phenotype', value = 'Log2_FC', -Comparison) 
 
-osm_tgfb_div<-plsr_y_variables %>%
+osm_tgfb_div<-plsr_y_variables_lfc %>%
   filter(Comparison == 'OSM_TGFB_vs_OSM' | Comparison == 'OSM_TGFB_vs_TGFB') %>%
   dplyr::select(-Plate) %>%
   gather(key = 'Phenotype', value = 'Log2_FC', -Comparison) 
 
-egf_osm_tgfb_div<-plsr_y_variables %>%
+egf_osm_tgfb_div<-plsr_y_variables_lfc %>%
   filter(Comparison == 'EGF_OSM_TGFB_vs_OSM' | Comparison == 'EGF_OSM_TGFB_vs_TGFB' | Comparison == 'EGF_OSM_TGFB_vs_EGF') %>%
   dplyr::select(-Plate) %>%
   gather(key = 'Phenotype', value = 'Log2_FC', -Comparison) 
 
 #summarise by treatment
 egf_osm_div_median <-egf_osm_div %>%
-  dplyr::select(-Replicate, -direction) %>%
   group_by(Comparison, Phenotype) %>%
   summarise_if(is.numeric,median)
 egf_tgfb_div_median <-egf_tgfb_div %>%
-  dplyr::select(-Replicate, -direction) %>%
   group_by(Comparison, Phenotype) %>%
   summarise_if(is.numeric,median)
 osm_tgfb_div_median <-osm_tgfb_div %>%
-  dplyr::select(-Replicate, -direction) %>%
   group_by(Comparison, Phenotype) %>%
   summarise_if(is.numeric,median)
 egf_osm_tgfb_div_median <-egf_osm_tgfb_div %>%
-  dplyr::select(-Replicate, -direction) %>%
   group_by(Comparison, Phenotype) %>%
   summarise_if(is.numeric,median)
 ```
 
 ```{r statistics}
 #run ANOVA followed by TukeyHSD
-statistical_tests<-plsr_y_variables %>%
-  select(-hours, -Plate) %>%
-  gather(key = 'Phenotype', value = 'Quantification', -Treatment)
-  do(data.frame(., e=Phenotype_StatTest(.)))  
+conditions=c('EGF_OSM','EGF_TGFB', 'OSM_TGFB', 'EGF_OSM_TGFB')
+phenotypes = c('Replicate_Cell_Count', 'Diffusion_Coefficient', 'Nearest_Neighbor_Distance', 'Cytoplasmic_Size')
+stat_tests<-list()
+for(condition in 1:length(conditions)){
+  test_condition=conditions[condition]
+  for(phenotype in 1:length(phenotypes)){
+    test_phenotype=phenotypes[phenotype]
+    
+     statistic<-Phenotype_StatTest(summarised_phenotypic_data = plsr_y_variables, combination_condition = test_condition, phenotype = test_phenotype)
+     stat_tests<-append(statistical_tests, stat_tests)
+  }}
 ```
 
 ```{r plotbarplots, echo= FALSE}
 #plot for single combination condition
 ggplot(egf_osm_div_median, aes(x=Log2_FC, y=Phenotype, group = Comparison, fill = Comparison)) + geom_col(colour="black",width=0.7,    
-           position=position_dodge(0.7)) + scale_fill_manual(breaks =c('EGF_OSM_vs_OSM', 'EGF_OSM_vs_EGF'),  labels = c("vs OSM", "vs EGF"), values = c("dodgerblue", "red")) + guides(fill = guide_legend(override.aes = list(shape = NA))) + geom_text(aes(label = sig, x=4.25), position = position_dodge(0.7), size= 10, hjust = .5, vjust = 1) + theme_bw() +
-  geom_point(data = egf_osm_div, aes(x=Log2_FC, y=Phenotype, group = Comparison, shape = Replicate),size = 2.5, position=position_dodge(0.7)) + theme(text = element_text(size=21), axis.text.y = element_text(size=21, face = 'bold'), axis.title.y = element_blank()) + xlim(-.5,4.5) +
+           position=position_dodge(0.7)) + scale_fill_manual(breaks =c('EGF_OSM_vs_OSM', 'EGF_OSM_vs_EGF'),  labels = c("vs OSM", "vs EGF"), values = c("dodgerblue", "red")) + guides(fill = guide_legend(override.aes = list(shape = NA))) + theme_bw() +
+  geom_point(data = egf_osm_div, aes(x=Log2_FC, y=Phenotype, group = Comparison),size = 2.5, position=position_dodge(0.7)) + theme(text = element_text(size=21), axis.text.y = element_text(size=21, face = 'bold'), axis.title.y = element_blank()) + xlim(-.5,4.5) +
   ggtitle('EGF_OSM') + theme(plot.title = element_text(hjust = 0.5)) + scale_y_discrete(labels = function(x) str_wrap(str_replace_all(x, "foo" , " "),                                                                                                   width = 20)) +
   guides(fill = guide_legend(order = 1, override.aes = list(shape = NA)),
          shape = guide_legend(order = 2))  + geom_vline(xintercept =0)
