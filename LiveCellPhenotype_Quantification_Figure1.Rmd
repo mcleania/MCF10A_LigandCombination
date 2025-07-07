@@ -15,36 +15,37 @@ library(dplyr)
 library(tidyverse)
 library(ggpmisc)
 library(lsmeans)
+library(ggridges)
 
 #set ligand graphical parameters
 combo_cols<- c(
-  "EGF+OSM" = "violet",
+  "EGF_OSM" = "violet",
   "OSM" = "dodgerblue",
   "EGF" = "red",
-  "EGF+TGFB" = "orange",
-  "OSM+TGFB" = "green4",
+  "EGF_TGFB" = "orange",
+  "OSM_TGFB" = "green4",
   "TGFB" = "yellow2",
-  "EGF+OSM+TGFB" = "black",
+  "EGF_OSM_TGFB" = "black",
   "PBS" = "gray65")
 
 combo_alpha<- c(
-  "EGF+OSM" = .4,
+  "EGF_OSM" = .4,
   "OSM" = 1,
   "EGF" = 1,
-  "EGF+TGFB" = .4,
-  "OSM+TGFB" = .4,
+  "EGF_TGFB" = .4,
+  "OSM_TGFB" = .4,
   "TGFB" = 1,
-  "EGF+OSM+TGFB" = .4,
+  "EGF_OSM_TGFB" = .4,
   "PBS" = .4)
 
 combo_linetype<- c(
-  "EGF+OSM" = 'dashed',
+  "EGF_OSM" = 'dashed',
   "OSM" = 'solid',
   "EGF" = 'solid',
-  "EGF+TGFB" = 'dashed',
-  "OSM+TGFB" = 'dashed',
+  "EGF_TGFB" = 'dashed',
+  "OSM_TGFB" = 'dashed',
   "TGFB" = 'solid',
-  "EGF+OSM+TGFB" = 'dashed',
+  "EGF_OSM_TGFB" = 'dashed',
   "PBS" = 'dashed')
 ```
 
@@ -141,12 +142,23 @@ nearest_neighbor_dist<-function(nuc_data){
   return(top_distances)
 }
 
+#calculate euclidean distance
+Euclidean<-function(data, point1){
+  distances<-numeric()
+  #remove seed1 from data frame
+  data_comp<-anti_join(data, point1, by = c("AreaShape_Center_X", "AreaShape_Center_Y"))
+  #calculate and return distances
+  for(i in 1:nrow(data_comp)){
+    distances[i]<-dist(rbind(data_comp[i,],point1))
+  }
+  return(distances)
+}
 ```
 
 
 ```{r live cell imaging analysis, echo=FALSE}
 #read in live cell tracking data
-full_meta<-read_csv('LigandCombination_LCimagingTracks.csv')
+full_meta<-read_csv('Data/LiveCellTracking_Data/LigandCombination_LCimagingTracks.csv')
 
 #QC to filter out small tracks < 10 time intervals (<2.5 Hrs)  
 track_lengths<-full_meta %>%
@@ -210,9 +222,7 @@ ggplot((cell_numbers_trt), aes(x=hours, y = Average_Relative_Cell_Count, group =
   theme(axis.text.x = element_text(angle = 0, size=rel(2)),
         axis.text.y = element_text(angle = 0, vjust = 0.5, hjust=1, size=rel(2)),
         plot.title = element_text(size = rel(2)),legend.text=element_text(size = rel(1)), axis.title = element_text(size = rel(2)),
-        legend.title=element_text(size = rel(2)), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
-  geom_label(aes(label = label,x=label_x, y =label_y),alpha = 1,
-                   na.rm = TRUE)
+        legend.title=element_text(size = rel(2)), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
 
 ```
 
@@ -220,7 +230,14 @@ ggplot((cell_numbers_trt), aes(x=hours, y = Average_Relative_Cell_Count, group =
 #calculate distance and displacement travelled for each cell
  
 #QC filter cells that travel unreasonable distances (>400um / hr)
-all_cells_qc_filtered<-full_meta_long %>%
+distance<-full_meta_long %>%
+  group_by(ObjectNumber, Metadata_Field, Metadata_Plate) %>%
+  arrange(ImageNumber) %>%
+  mutate(X_diff = AreaShape_Center_X - dplyr::lag(AreaShape_Center_X, default = first(AreaShape_Center_X))) %>%
+  mutate(Y_diff = AreaShape_Center_Y - dplyr::lag(AreaShape_Center_Y, default = first(AreaShape_Center_Y))) %>%
+  mutate(distance_diff = sqrt(X_diff^2 + Y_diff^2)) 
+
+all_cells_qc_filtered<-distance %>%
   group_by(ObjectNumber, Metadata_Field, Metadata_Plate, treatment) %>%
   mutate(max_dist = max(distance_diff)) %>%
   filter(max_dist < 200)
@@ -230,7 +247,7 @@ msd<-msd_all_images(all_cells_qc_filtered, until = 12)
 
 #calculate median MSD by replicate
 msd_avg<-msd %>%
-  group_by( time_interval, treatment) %>%
+  group_by( time_interval, treatment, Metadata_Plate) %>%
   mutate(msd_cell_sd = sd(MSD)) %>%
   summarize(median_replicate_msd = mean(MSD), well_msd_sd = mean(msd_cell_sd))  %>%
   mutate(field_msd_ci = 1.96*well_msd_sd) %>%
@@ -250,11 +267,6 @@ for(item in 1:nrow(m.interaction)){
   coeff<-rbind(coeff, object)
 }
 
-#obtain slopes using linear model
-m.lst <- lstrends(m.interaction, "treatment", var="time_interval")
-
-slopes<-as.data.frame(m.lst)
-
 #plot treatment summarised MSD
 msd_trt<-msd %>%
   group_by(time_interval, treatment) %>%
@@ -272,13 +284,9 @@ ggplot((msd_trt), aes(x=(time_interval_hours), y = (trt_average_msd), group = tr
   theme(axis.text.x = element_text(angle = 0, size=rel(2)),
         axis.text.y = element_text(angle = 0, vjust = 0.5, hjust=1, size=rel(2)),
         plot.title = element_text(size = rel(2)),legend.text=element_text(size = rel(1)), axis.title = element_text(size = rel(2)),
-        legend.title=element_text(size = rel(2)), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
-  geom_label(aes(label = label, x=label_x, y = label_y),alpha = 1,
-                   na.rm = TRUE)
+        legend.title=element_text(size = rel(2)), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
 
 #Plot single cell distributions of motility
-msd$treatment<-factor(msd$treatment, levels = c('EGF', 'OSM', 'TGFB', 'EGF_OSM', 'EGF_TGFB', 'OSM_TGFB', 'EGF_OSM_TGFB', 'PBS'), labels = c('EGF', 'OSM', 'TGFB', 'EGF+OSM', 'EGF+TGFB', 'OSM+TGFB', 'EGF+OSM+TGFB', 'PBS'))
-
 msd_plot_sc<-msd %>%
   mutate(time_interval_hours = time_interval / 60) %>%
   mutate(hours_label = paste0(time_interval_hours, ' Hrs'))
@@ -364,9 +372,7 @@ ggplot((near_neigh_combo_trt), aes(x=hours, y=second_nearest_neighbor_trt, group
   theme(axis.text.x = element_text(angle = 0, size=rel(2)),
         axis.text.y = element_text(angle = 0, vjust = 0.5, hjust=1, size=rel(2)),
         plot.title = element_text(size = rel(2)),legend.text=element_text(size = rel(1)), axis.title = element_text(size = rel(2)),
-        legend.title=element_text(size = rel(2)), panel.grid.major = element_blank(), panel.grid.minor = element_blank())  +
-  geom_label(aes(label = label, x=label_x, y =label_y),alpha = 1,
-                   na.rm = TRUE)
+        legend.title=element_text(size = rel(2)), panel.grid.major = element_blank(), panel.grid.minor = element_blank())  
 
 #replicate level Nearest Neighbor Distance at 24 hours for PLSR
 near_neigh_combo_trt_24<-near_neigh_combo_trt %>%
